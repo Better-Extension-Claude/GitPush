@@ -1,5 +1,6 @@
 //! Fenêtres Win32 : trouver Claude, coller nos fenêtres dessus (fenêtres « possédées »).
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,9 +10,11 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetCursorPos, GetWindow, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetMessageW, SetTimer, EVENT_OBJECT_LOCATIONCHANGE, MSG, OBJID_WINDOW,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_TIMER, GetCursorPos, GetWindow, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT,
     GW_OWNER, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
 };
@@ -30,6 +33,7 @@ pub struct Rect {
 #[derive(Default)]
 pub struct Shared {
     pub claude: isize,
+    pub button: isize,
     pub rect: Rect,
     pub scale: f32,
     pub offset: (i32, i32),
@@ -150,65 +154,169 @@ pub fn cursor() -> (i32, i32) {
     (p.x, p.y)
 }
 
+/// Place le bouton sur Claude. Appelé sans tenir le verrou : `SetWindowPos` attend le fil
+/// de l'interface, qui peut lui-même attendre le verrou.
+fn place_button(button: HWND, rect: Rect, offset: (i32, i32), scale: f32) {
+    let x = rect.x + offset.0.clamp(0, (rect.w - (120.0 * scale) as i32).max(0));
+    let y = rect.y + offset.1.clamp(0, (rect.h - (32.0 * scale) as i32).max(0));
+    unsafe { SetWindowPos(button, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+}
+
+/// Déplace le bouton tout de suite (glisser au clic droit), sans attendre le fil de suivi.
+pub fn move_button(shared: &SharedRef, offset: (i32, i32)) {
+    let (button, rect, scale) = {
+        let mut g = shared.lock().unwrap();
+        g.offset = offset;
+        (g.button, g.rect, g.scale)
+    };
+    if button != 0 {
+        place_button(button as HWND, rect, offset, scale);
+    }
+}
+
+struct Tracker {
+    shared: SharedRef,
+    started: Instant,
+    last_seen: Option<Instant>,
+    claude: HWND,
+    button: HWND,
+    modal: HWND,
+    hook: HWINEVENTHOOK,
+    button_hidden: bool,
+}
+
+thread_local! {
+    static TRACKER: RefCell<Option<Tracker>> = const { RefCell::new(None) };
+}
+
+impl Tracker {
+    /// Recherche périodique : Claude (ouvert, fermé, recréé) et nos propres fenêtres.
+    fn tick(&mut self) {
+        let s = search();
+        if s.claude.is_null() {
+            let gone = match self.last_seen {
+                Some(t) => t.elapsed() > Duration::from_secs(10),
+                None => self.started.elapsed() > Duration::from_secs(180),
+            };
+            if gone {
+                std::process::exit(0);
+            }
+            return;
+        }
+        self.last_seen = Some(Instant::now());
+        if s.claude != self.claude {
+            // Suivi instantané : Windows nous prévient à chaque déplacement de Claude.
+            unsafe {
+                if !self.hook.is_null() {
+                    UnhookWinEvent(self.hook);
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(s.claude, &mut pid);
+                self.hook = SetWinEventHook(
+                    EVENT_OBJECT_LOCATIONCHANGE,
+                    EVENT_OBJECT_LOCATIONCHANGE,
+                    std::ptr::null_mut(),
+                    Some(on_location),
+                    pid,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
+            }
+        }
+        self.claude = s.claude;
+        self.button = s.button;
+        self.modal = s.modal;
+        if !s.button.is_null() {
+            own(s.button, s.claude);
+        }
+        self.place(true);
+    }
+
+    fn place(&mut self, full: bool) {
+        if self.claude.is_null() || unsafe { IsIconic(self.claude) } != 0 {
+            return;
+        }
+        let rect = bounds(self.claude);
+        let scale = unsafe { GetDpiForWindow(self.claude) } as f32 / 96.0;
+        let (offset, modal_open, focus_modal) = {
+            let mut g = self.shared.lock().unwrap();
+            g.claude = self.claude as isize;
+            g.button = self.button as isize;
+            g.rect = rect;
+            g.scale = scale;
+            let f = g.focus_modal && !self.modal.is_null();
+            if f {
+                g.focus_modal = false;
+            }
+            (g.offset, g.modal_open, f)
+        };
+        if !self.button.is_null() {
+            place_button(self.button, rect, offset, scale);
+            if full {
+                unsafe {
+                    if modal_open && !self.button_hidden {
+                        ShowWindow(self.button, SW_HIDE);
+                        self.button_hidden = true;
+                    } else if !modal_open && self.button_hidden {
+                        ShowWindow(self.button, SW_SHOWNOACTIVATE);
+                        self.button_hidden = false;
+                    }
+                }
+            }
+        }
+        if modal_open && !self.modal.is_null() {
+            if full {
+                own(self.modal, self.claude);
+            }
+            unsafe {
+                SetWindowPos(self.modal, std::ptr::null_mut(), rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOACTIVATE);
+                if focus_modal {
+                    SetForegroundWindow(self.modal);
+                }
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn on_location(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
+    if id_object != OBJID_WINDOW || id_child != 0 {
+        return;
+    }
+    TRACKER.with(|t| {
+        if let Ok(mut t) = t.try_borrow_mut() {
+            if let Some(t) = t.as_mut() {
+                if t.claude == hwnd {
+                    t.place(false);
+                }
+            }
+        }
+    });
+}
+
 /// Fil de suivi : colle le bouton (et le modal) à la fenêtre de Claude, et quitte
 /// l'application quand Claude est fermé.
 pub fn track(shared: SharedRef) {
     std::thread::spawn(move || {
-        let started = Instant::now();
-        let mut last_seen: Option<Instant> = None;
-        let mut button_hidden = false;
-        loop {
-            std::thread::sleep(Duration::from_millis(40));
-            let s = search();
-            if s.claude.is_null() {
-                let gone = match last_seen {
-                    Some(t) => t.elapsed() > Duration::from_secs(10),
-                    None => started.elapsed() > Duration::from_secs(180),
-                };
-                if gone {
-                    std::process::exit(0);
-                }
-                continue;
-            }
-            last_seen = Some(Instant::now());
-            let rect = bounds(s.claude);
-            let scale = unsafe { GetDpiForWindow(s.claude) } as f32 / 96.0;
-            let (offset, modal_open, focus_modal) = {
-                let mut g = shared.lock().unwrap();
-                g.claude = s.claude as isize;
-                g.rect = rect;
-                g.scale = scale;
-                let f = g.focus_modal && !s.modal.is_null();
-                if f {
-                    g.focus_modal = false;
-                }
-                (g.offset, g.modal_open, f)
-            };
-            if unsafe { IsIconic(s.claude) } != 0 {
-                continue;
-            }
-            if !s.button.is_null() {
-                own(s.button, s.claude);
-                let x = rect.x + offset.0.clamp(0, (rect.w - (120.0 * scale) as i32).max(0));
-                let y = rect.y + offset.1.clamp(0, (rect.h - (32.0 * scale) as i32).max(0));
-                unsafe {
-                    SetWindowPos(s.button, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                    if modal_open && !button_hidden {
-                        ShowWindow(s.button, SW_HIDE);
-                        button_hidden = true;
-                    } else if !modal_open && button_hidden {
-                        ShowWindow(s.button, SW_SHOWNOACTIVATE);
-                        button_hidden = false;
-                    }
-                }
-            }
-            if modal_open && !s.modal.is_null() {
-                own(s.modal, s.claude);
-                unsafe {
-                    SetWindowPos(s.modal, std::ptr::null_mut(), rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOACTIVATE);
-                    if focus_modal {
-                        SetForegroundWindow(s.modal);
-                    }
+        TRACKER.with(|t| {
+            *t.borrow_mut() = Some(Tracker {
+                shared,
+                started: Instant::now(),
+                last_seen: None,
+                claude: std::ptr::null_mut(),
+                button: std::ptr::null_mut(),
+                modal: std::ptr::null_mut(),
+                hook: std::ptr::null_mut(),
+                button_hidden: false,
+            })
+        });
+        unsafe {
+            SetTimer(std::ptr::null_mut(), 0, 50, None);
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                if msg.message == WM_TIMER {
+                    TRACKER.with(|t| t.borrow_mut().as_mut().map(Tracker::tick));
+                } else {
+                    DispatchMessageW(&msg);
                 }
             }
         }

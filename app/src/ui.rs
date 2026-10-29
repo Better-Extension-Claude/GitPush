@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_OFFSET: (i32, i32) = (170, 6);
+pub const DEFAULT_OFFSET: (i32, i32) = (300, 44);
 
 const BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x24);
 const FIELD: Color32 = Color32::from_rgb(0x1f, 0x1e, 0x1d);
@@ -121,16 +121,18 @@ impl eframe::App for App {
             let fill = if resp.hovered() || resp.dragged() { ACCENT_HOVER } else { ACCENT };
             ui.painter().rect_filled(rect.shrink(1.0), Rounding::same(rect.height() / 2.0), fill);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, "↑  GitPush", bold(13.5), Color32::WHITE);
-            if resp.drag_started() {
+            // Clic droit maintenu : déplacer le bouton.
+            let moving = resp.dragged_by(egui::PointerButton::Secondary);
+            if resp.drag_started_by(egui::PointerButton::Secondary) {
                 let offset = self.shared.lock().unwrap().offset;
                 self.drag = Some((win::cursor(), offset));
             }
-            if let (true, Some((start, offset))) = (resp.dragged(), self.drag) {
+            if let (true, Some((start, offset))) = (moving, self.drag) {
                 let now = win::cursor();
-                self.shared.lock().unwrap().offset = (offset.0 + now.0 - start.0, offset.1 + now.1 - start.1);
+                win::move_button(&self.shared, (offset.0 + now.0 - start.0, offset.1 + now.1 - start.1));
                 ctx.request_repaint();
             }
-            if resp.drag_stopped() {
+            if self.drag.is_some() && !moving {
                 self.drag = None;
                 self.cfg.offset = Some(self.shared.lock().unwrap().offset);
                 self.cfg.save();
@@ -138,7 +140,7 @@ impl eframe::App for App {
             if resp.clicked() {
                 self.open_modal(ctx);
             }
-            resp.on_hover_text("Pousser ce projet sur GitHub (glisser pour déplacer)");
+            resp.on_hover_text("Pousser ce projet sur GitHub (clic droit maintenu pour déplacer)");
         });
 
         // Le modal, dans sa propre fenêtre collée sur Claude.
