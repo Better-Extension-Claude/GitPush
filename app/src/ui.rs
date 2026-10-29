@@ -1,5 +1,5 @@
 use crate::data::{self, Check, Config, Conversation, Entry, Project, PushResult};
-use crate::win::{self, SharedRef};
+use crate::win;
 use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, FontFamily, FontId, Key, Layout, Margin, Rect, RichText, Rounding, Sense,
     Shape, Stroke, Ui,
@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_OFFSET: (i32, i32) = (300, 44);
 
 const BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x24);
 const FIELD: Color32 = Color32::from_rgb(0x1f, 0x1e, 0x1d);
@@ -17,7 +16,6 @@ const BORDER: Color32 = Color32::from_rgb(0x45, 0x44, 0x3f);
 const TEXT: Color32 = Color32::from_rgb(0xec, 0xeb, 0xe6);
 const SUBTLE: Color32 = Color32::from_rgb(0x9a, 0x98, 0x93);
 const ACCENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
-const ACCENT_HOVER: Color32 = Color32::from_rgb(0xe3, 0x8b, 0x6e);
 const OK: Color32 = Color32::from_rgb(0x8c, 0xc0, 0x76);
 const ERR: Color32 = Color32::from_rgb(0xe5, 0x6b, 0x5d);
 
@@ -25,31 +23,42 @@ fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
 }
 
-pub struct App {
+/// La fenêtre GitPush : une fenêtre Windows normale, centrée sur Claude à l'ouverture.
+pub fn run_modal() {
+    let cfg = Config::load();
+    let size = [800.0_f32, 720.0];
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(win::MODAL_TITLE)
+        .with_inner_size(size)
+        .with_min_inner_size([520.0, 420.0])
+        .with_active(true);
+    if let Some((rect, scale)) = win::claude_rect() {
+        let x = (rect.x as f32 + (rect.w as f32 - size[0] * scale) / 2.0) / scale;
+        let y = (rect.y as f32 + (rect.h as f32 - size[1] * scale) / 2.0) / scale;
+        viewport = viewport.with_position([x.max(0.0), y.max(0.0)]);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    let _ = eframe::run_native(
+        win::MODAL_TITLE,
+        options,
+        Box::new(move |cc| {
+            setup_style(&cc.egui_ctx);
+            Ok(Box::new(ModalApp { modal: Modal::new(&cc.egui_ctx), cfg }))
+        }),
+    );
+}
+
+struct ModalApp {
     cfg: Config,
-    shared: SharedRef,
-    drag: Option<((i32, i32), (i32, i32))>,
-    is_pressed: bool,
-    modal: Option<Modal>,
+    modal: Modal,
 }
 
-impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, shared: SharedRef) -> App {
-        setup_style(&cc.egui_ctx);
-        App { cfg, shared, drag: None, is_pressed: false, modal: None }
-    }
-
-    fn open_modal(&mut self, ctx: &egui::Context) {
-        if self.modal.is_some() {
-            ctx.send_viewport_cmd_to(modal_id(), egui::ViewportCommand::Focus);
-            return;
+impl eframe::App for ModalApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.modal.show(ctx, &mut self.cfg) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        self.modal = Some(Modal::new(ctx));
     }
-}
-
-fn modal_id() -> egui::ViewportId {
-    egui::ViewportId::from_hash_of("gitpush-modal")
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -107,86 +116,6 @@ fn setup_style(ctx: &egui::Context) {
         s.text_styles.insert(egui::TextStyle::Button, FontId::proportional(14.5));
         s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(12.5));
     });
-}
-
-impl eframe::App for App {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(250));
-
-        // Le bouton flottant.
-        egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
-            let rect = ui.max_rect();
-            let resp = ui.interact(rect, ui.id().with("gitpush-button"), Sense::hover());
-            let fill = if resp.hovered() || self.drag.is_some() { ACCENT_HOVER } else { ACCENT };
-            ui.painter().rect_filled(rect.shrink(1.0), Rounding::same(rect.height() / 2.0), fill);
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, "↑  GitPush", bold(13.5), Color32::WHITE);
-
-            // Clics lus directement dans les événements : egui ignore l'appui qui arrive
-            // dans la même image que l'activation de la fenêtre, d'où des clics perdus.
-            let mut open = false;
-            for e in ctx.input(|i| i.events.clone()) {
-                let egui::Event::PointerButton { pos, button, pressed, .. } = e else { continue };
-                match (button, pressed) {
-                    (egui::PointerButton::Primary, true) => self.is_pressed = rect.contains(pos),
-                    (egui::PointerButton::Primary, false) => {
-                        open = self.is_pressed && rect.contains(pos);
-                        self.is_pressed = false;
-                    }
-                    // Clic droit maintenu : déplacer le bouton.
-                    (egui::PointerButton::Secondary, true) if rect.contains(pos) => {
-                        let offset = self.shared.lock().unwrap().offset;
-                        self.drag = Some((win::cursor(), offset));
-                    }
-                    (egui::PointerButton::Secondary, false) if self.drag.is_some() => {
-                        self.drag = None;
-                        self.cfg.offset = Some(self.shared.lock().unwrap().offset);
-                        self.cfg.save();
-                    }
-                    _ => {}
-                }
-            }
-            if let Some((start, offset)) = self.drag {
-                let now = win::cursor();
-                win::move_button(&self.shared, (offset.0 + now.0 - start.0, offset.1 + now.1 - start.1));
-                ctx.request_repaint();
-            }
-            if open {
-                crate::debug("bouton : ouverture");
-                self.open_modal(ctx);
-            }
-        });
-
-        // La fenêtre GitPush : une fenêtre Windows normale, centrée sur Claude à l'ouverture.
-        let App { modal, cfg, shared, .. } = self;
-        let mut is_closed = false;
-        if let Some(m) = modal.as_mut() {
-            let (rect, scale) = {
-                let g = shared.lock().unwrap();
-                (g.rect, g.scale.max(1.0))
-            };
-            let size = [800.0_f32, 720.0];
-            let mut builder = egui::ViewportBuilder::default()
-                .with_title(win::MODAL_TITLE)
-                .with_inner_size(size)
-                .with_min_inner_size([520.0, 420.0])
-                .with_active(true);
-            if rect.w > 0 {
-                let x = (rect.x as f32 + (rect.w as f32 - size[0] * scale) / 2.0) / scale;
-                let y = (rect.y as f32 + (rect.h as f32 - size[1] * scale) / 2.0) / scale;
-                builder = builder.with_position([x.max(0.0), y.max(0.0)]);
-            }
-            ctx.show_viewport_immediate(modal_id(), builder, |ctx, _class| {
-                is_closed = m.show(ctx, cfg, shared);
-            });
-        }
-        if is_closed {
-            *modal = None;
-        }
-    }
 }
 
 // ---------------------------------------------------------------- Modal
@@ -403,7 +332,7 @@ impl Modal {
     }
 
     /// Dessine le modal ; renvoie vrai quand il faut le fermer.
-    fn show(&mut self, ctx: &egui::Context, cfg: &mut Config, shared: &SharedRef) -> bool {
+    fn show(&mut self, ctx: &egui::Context, cfg: &mut Config) -> bool {
         self.receive(cfg);
         let mut close = ctx.input(|i| i.key_pressed(Key::Escape) || i.viewport().close_requested());
         if self.close_at.map(|t| Instant::now() >= t).unwrap_or(false) {
@@ -416,14 +345,14 @@ impl Modal {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BG).inner_margin(Margin::same(20.0)))
             .show(ctx, |ui| {
-                if self.contents(ui, cfg, shared) {
+                if self.contents(ui, cfg) {
                     close = true;
                 }
             });
         close
     }
 
-    fn contents(&mut self, ui: &mut Ui, cfg: &mut Config, shared: &SharedRef) -> bool {
+    fn contents(&mut self, ui: &mut Ui, cfg: &mut Config) -> bool {
         let mut close = false;
 
         // En-tête
@@ -434,12 +363,12 @@ impl Modal {
                     close = true;
                 }
                 if ui.add(egui::Button::new(RichText::new("Quitter GitPush").small().color(SUBTLE)).frame(false)).clicked() {
+                    win::quit_button();
                     std::process::exit(0);
                 }
                 if ui.add(egui::Button::new(RichText::new("Replacer le bouton").small().color(SUBTLE)).frame(false)).clicked() {
                     cfg.offset = None;
-                    cfg.save();
-                    shared.lock().unwrap().offset = DEFAULT_OFFSET;
+                    win::reset_button();
                 }
             });
         });
