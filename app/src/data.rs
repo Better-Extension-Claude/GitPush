@@ -521,29 +521,106 @@ pub fn push(cwd: &str, remote: &str, branch: &str, selection: &[String], message
 #[derive(Clone, PartialEq)]
 pub enum GitHub {
     Checking,
-    Connected(String),
+    /// Compte actif, et tous les comptes connus de `gh` sur github.com.
+    Connected { login: String, accounts: Vec<String> },
     SignedOut,
     NoCli,
 }
 
 pub fn github_account() -> GitHub {
-    let r = run("gh", "", Duration::from_secs(20), &["api", "user", "-q", ".login"]);
-    if r.ok && !r.out.trim().is_empty() {
-        GitHub::Connected(r.out.trim().into())
-    } else if r.err.contains("introuvable") {
-        GitHub::NoCli
-    } else {
-        GitHub::SignedOut
+    let status = run("gh", "", Duration::from_secs(20), &["auth", "status", "--hostname", "github.com"]);
+    if status.err.contains("introuvable") {
+        return GitHub::NoCli;
+    }
+    // « Logged in to github.com account NOM (keyring) » puis « Active account: true|false ».
+    let text = format!("{}\n{}", status.out, status.err);
+    let account_rx = Regex::new(r"account (\S+)").unwrap();
+    let (mut accounts, mut active) = (Vec::new(), None);
+    for line in text.lines() {
+        if line.contains("Logged in to") {
+            if let Some(c) = account_rx.captures(line) {
+                accounts.push(c[1].to_string());
+            }
+        } else if line.contains("Active account: true") {
+            active = accounts.last().cloned();
+        }
+    }
+    match active.or_else(|| accounts.first().cloned()) {
+        Some(login) => GitHub::Connected { login, accounts },
+        None => GitHub::SignedOut,
     }
 }
 
-/// Ouvre une console qui connecte `gh` à GitHub (via le navigateur), puis le déclare
-/// comme gestionnaire d'identifiants de git : les push passent alors par ce compte.
-pub fn github_sign_in() {
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    let script = "gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git \
-                  && echo. && echo Connecte : tu peux fermer cette fenetre. & pause";
-    let _ = Command::new("cmd").raw_arg(format!("/c {script}")).creation_flags(CREATE_NEW_CONSOLE).spawn();
+/// Étapes de la connexion d'un compte GitHub.
+pub enum Login {
+    /// Code à saisir sur la page GitHub (déjà copié dans le presse-papiers).
+    Code(String),
+    Done(Result<(), String>),
+}
+
+/// Connecte un compte (nouveau ou existant) : `gh` affiche un code, on ouvre la page GitHub,
+/// `gh` attend la validation. Puis git est réglé pour pousser avec ce compte.
+pub fn github_login(report: impl Fn(Login)) {
+    let child = Command::new("gh")
+        .args(["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--skip-ssh-key"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return report(Login::Done(Err(format!("gh introuvable ({e})")))),
+    };
+    let code_rx = Regex::new(r"\b([A-Z0-9]{4}-[A-Z0-9]{4})\b").unwrap();
+    let url_rx = Regex::new(r"https://\S+").unwrap();
+    let mut last = String::new();
+    let (mut code, mut url) = (None::<String>, None::<String>);
+    if let Some(err) = child.stderr.take() {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(err)).map_while(Result::ok) {
+            if code.is_none() {
+                code = code_rx.captures(&line).map(|c| c[1].to_string());
+            }
+            if url.is_none() {
+                url = url_rx.find(&line).map(|m| m.as_str().to_string());
+                if let (Some(c), Some(u)) = (&code, &url) {
+                    report(Login::Code(c.clone()));
+                    open_url(u);
+                }
+            }
+            if !line.trim().is_empty() {
+                last = line;
+            }
+        }
+    }
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        return report(Login::Done(Err(last.trim().trim_start_matches(['!', 'X', ' ']).to_string())));
+    }
+    run("gh", "", Duration::from_secs(30), &["auth", "setup-git", "--hostname", "github.com"]);
+    report(Login::Done(Ok(())));
+}
+
+pub fn github_switch(login: &str) -> Result<(), String> {
+    let r = run("gh", "", Duration::from_secs(20), &["auth", "switch", "--hostname", "github.com", "--user", login]);
+    if !r.ok {
+        return Err(r.last());
+    }
+    run("gh", "", Duration::from_secs(30), &["auth", "setup-git", "--hostname", "github.com"]);
+    Ok(())
+}
+
+pub fn github_logout(login: &str) -> Result<(), String> {
+    let r = run("gh", "", Duration::from_secs(20), &["auth", "logout", "--hostname", "github.com", "--user", login]);
+    if r.ok {
+        Ok(())
+    } else {
+        Err(r.last())
+    }
+}
+
+fn open_url(url: &str) {
+    let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
 pub fn install_github_cli() {

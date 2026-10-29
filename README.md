@@ -24,8 +24,8 @@ GitPush a son propre accès à GitHub, indépendant de Claude : Claude n'a pas b
 
 Il passe par [GitHub CLI](https://cli.github.com) (`gh`). Le compte connecté s'affiche en haut à droite de la fenêtre :
 
-- **Connecter GitHub** ouvre une console puis le navigateur pour te connecter, et règle git pour que les push passent par ce compte. GitPush détecte la connexion tout seul.
-- Cliquer sur le compte connecté permet d'en changer.
+- **Connecter GitHub** ouvre la page de connexion GitHub dans le navigateur ; GitPush affiche le code à y coller (déjà copié). Pour un autre compte que celui ouvert dans le navigateur, changer de compte sur cette page.
+- Le menu du compte connecté permet de passer d'un compte à l'autre, d'en ajouter un ou de se déconnecter. Les push passent toujours par le compte actif.
 - **Installer GitHub CLI** apparaît si `gh` manque.
 
 Nécessite aussi `git`.

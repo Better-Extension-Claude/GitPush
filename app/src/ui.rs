@@ -1,4 +1,4 @@
-use crate::data::{self, Check, Config, Conversation, Entry, GitHub, Project, PushResult};
+use crate::data::{self, Check, Config, Conversation, Entry, GitHub, Login, Project, PushResult};
 use crate::win;
 use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, FontFamily, FontId, Key, Layout, Margin, Rect, RichText, Rounding, Sense,
@@ -134,6 +134,8 @@ enum Msg {
     Pushed { cwd: String, result: PushResult, selection: Vec<String>, date: String },
     Created(Result<String, String>),
     Account(GitHub),
+    Login(Login),
+    AccountChanged(Result<(), String>),
 }
 
 struct Modal {
@@ -162,8 +164,7 @@ struct Modal {
     can_force: bool,
     close_at: Option<Instant>,
     account: GitHub,
-    /// Connexion lancée dans une console : on revérifie le compte régulièrement.
-    sign_in_at: Option<Instant>,
+    is_logging_in: bool,
 }
 
 enum Action {
@@ -203,7 +204,7 @@ impl Modal {
             can_force: false,
             close_at: None,
             account: GitHub::Checking,
-            sign_in_at: None,
+            is_logging_in: false,
         };
         m.select(0);
         m.check_account();
@@ -216,19 +217,38 @@ impl Modal {
 
     /// Compte GitHub de l'app, en haut à droite (mise en page de droite à gauche).
     fn account_badge(&mut self, ui: &mut Ui) {
+        if self.is_logging_in {
+            ui.label(RichText::new("Connexion GitHub en cours…").small().color(SUBTLE));
+            return;
+        }
         match self.account.clone() {
             GitHub::Checking => {
                 ui.label(RichText::new("GitHub…").small().color(SUBTLE));
             }
-            GitHub::Connected(login) => {
-                let text = RichText::new(format!("●  GitHub : {login}")).small().color(OK);
-                if ui
-                    .add(egui::Button::new(text).frame(false))
-                    .on_hover_text("Compte utilisé pour les push, indépendant de Claude.\nCliquer pour changer de compte.")
-                    .clicked()
-                {
-                    self.sign_in();
-                }
+            GitHub::Connected { login, accounts } => {
+                let text = RichText::new(format!("●  GitHub : {login}  ▾")).small().color(OK);
+                ui.menu_button(text, |ui| {
+                    ui.label(RichText::new("Compte utilisé pour les push, indépendant de Claude").small().color(SUBTLE));
+                    ui.separator();
+                    for account in &accounts {
+                        if account == &login {
+                            ui.label(RichText::new(format!("✓  {account}")).color(OK));
+                        } else if ui.button(format!("Utiliser {account}")).clicked() {
+                            let account = account.clone();
+                            self.spawn(move || Msg::AccountChanged(data::github_switch(&account)));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Ajouter un compte GitHub…").clicked() {
+                        self.sign_in();
+                        ui.close_menu();
+                    }
+                    if ui.button(format!("Déconnecter {login}")).clicked() {
+                        self.spawn(move || Msg::AccountChanged(data::github_logout(&login)));
+                        ui.close_menu();
+                    }
+                });
             }
             GitHub::SignedOut => {
                 let text = RichText::new("Connecter GitHub").small().color(Color32::WHITE);
@@ -246,10 +266,17 @@ impl Modal {
         }
     }
 
+    /// Connexion d'un compte : page GitHub dans le navigateur, code affiché ici.
     fn sign_in(&mut self) {
-        data::github_sign_in();
-        self.sign_in_at = Some(Instant::now());
-        self.set_status("Termine la connexion dans la console et le navigateur ; GitPush la détecte tout seul.", Kind::Info);
+        self.is_logging_in = true;
+        self.set_status("Ouverture de la page GitHub…", Kind::Info);
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            data::github_login(|step| {
+                let _ = tx.send(Msg::Login(step));
+                ctx.request_repaint();
+            });
+        });
     }
 
     fn spawn(&self, work: impl FnOnce() -> Msg + Send + 'static) {
@@ -377,14 +404,31 @@ impl Modal {
                     self.set_status(format!("Échec de la création : {e}"), Kind::Err);
                 }
                 Msg::Account(account) => {
-                    if let GitHub::Connected(login) = &account {
-                        if self.sign_in_at.take().is_some() {
-                            self.set_status(format!("Connecté à GitHub : {login}."), Kind::Ok);
+                    if let GitHub::Connected { login, .. } = &account {
+                        let changed = matches!(&self.account, GitHub::Connected { login: old, .. } if old != login);
+                        if changed {
+                            self.set_status(format!("Les push passent maintenant par le compte GitHub {login}."), Kind::Ok);
                             self.repos = None;
                         }
                     }
                     self.account = account;
                 }
+                Msg::Login(Login::Code(code)) => {
+                    self.set_status(
+                        format!("Code {code} (copié) : colle-le dans la page GitHub ouverte. Pour un autre compte, change de compte sur cette page."),
+                        Kind::Info,
+                    );
+                }
+                Msg::Login(Login::Done(result)) => {
+                    self.is_logging_in = false;
+                    match result {
+                        Ok(()) => self.set_status("Compte GitHub connecté.", Kind::Ok),
+                        Err(e) => self.set_status(format!("Connexion GitHub annulée ou échouée : {e}"), Kind::Err),
+                    }
+                    self.check_account();
+                }
+                Msg::AccountChanged(Err(e)) => self.set_status(e, Kind::Err),
+                Msg::AccountChanged(Ok(())) => self.check_account(),
             }
         }
     }
@@ -398,21 +442,6 @@ impl Modal {
         }
         if self.close_at.is_some() || self.is_busy || self.is_loading {
             ctx.request_repaint_after(Duration::from_millis(100));
-        }
-        // Pendant la connexion dans la console, revérifie le compte toutes les 3 s (5 min max).
-        if let Some(t) = self.sign_in_at {
-            if t.elapsed() > Duration::from_secs(300) {
-                self.sign_in_at = None;
-            } else if self.account != GitHub::Checking {
-                self.account = GitHub::Checking;
-                let tx = self.tx.clone();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_secs(3));
-                    let _ = tx.send(Msg::Account(data::github_account()));
-                    ctx.request_repaint();
-                });
-            }
         }
 
         egui::CentralPanel::default()
