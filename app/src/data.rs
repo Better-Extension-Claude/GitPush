@@ -68,9 +68,76 @@ impl Conversation {
     }
 }
 
+/// Conversations, celle affichée dans Claude en premier : d'abord les sessions de l'app
+/// desktop (triées par `lastFocusedAt`), puis les .jsonl de Claude Code en complément.
+pub fn recent_conversations(count: usize) -> Vec<Conversation> {
+    let mut list = desktop_sessions(count);
+    for c in jsonl_conversations(count) {
+        if list.len() >= count {
+            break;
+        }
+        if !list.iter().any(|d| d.cwd.eq_ignore_ascii_case(&c.cwd)) {
+            list.push(c);
+        }
+    }
+    list
+}
+
+/// L'app desktop garde une fiche par session :
+/// %LOCALAPPDATA%\Claude-Data\<profil>\claude-code-sessions\<compte>\<org>\local_<id>.json,
+/// avec `lastFocusedAt` mis à jour quand la conversation est affichée.
+fn desktop_sessions(count: usize) -> Vec<Conversation> {
+    let mut roots = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if let Ok(profiles) = fs::read_dir(Path::new(&local).join("Claude-Data")) {
+            roots.extend(profiles.flatten().map(|p| p.path().join("claude-code-sessions")));
+        }
+    }
+    if let Ok(roaming) = std::env::var("APPDATA") {
+        roots.push(Path::new(&roaming).join("Claude").join("claude-code-sessions"));
+    }
+    let field = |name: &str| Regex::new(&format!(r#""{name}":("(?:[^"\\]|\\.)*"|[0-9]+|true|false)"#)).unwrap();
+    let (cwd_rx, title_rx, focus_rx, activity_rx, archived_rx) =
+        (field("cwd"), field("title"), field("lastFocusedAt"), field("lastActivityAt"), field("isArchived"));
+    let mut found: Vec<(u64, Conversation)> = Vec::new();
+    for root in roots {
+        for account in fs::read_dir(&root).into_iter().flatten().flatten() {
+            for org in fs::read_dir(account.path()).into_iter().flatten().flatten() {
+                for e in fs::read_dir(org.path()).into_iter().flatten().flatten() {
+                    let path = e.path();
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if !name.starts_with("local_") || !name.ends_with(".json") {
+                        continue;
+                    }
+                    let head = chunk(&path, 0, 16 * 1024);
+                    let get = |rx: &Regex| rx.captures(&head).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+                    let text = |rx: &Regex| get(rx).and_then(|raw| serde_json::from_str::<String>(&raw).ok());
+                    if get(&archived_rx).as_deref() == Some("true") {
+                        continue;
+                    }
+                    let Some(cwd) = text(&cwd_rx) else { continue };
+                    if !Path::new(&cwd).is_dir() {
+                        continue;
+                    }
+                    let focus = get(&focus_rx).or_else(|| get(&activity_rx)).and_then(|n| n.parse().ok()).unwrap_or(0);
+                    let title = text(&title_rx).filter(|t| !t.is_empty()).unwrap_or_else(|| folder_name(&cwd));
+                    let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                    found.push((focus, Conversation { title, cwd, modified }));
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().take(count).map(|(_, c)| c).collect()
+}
+
+fn folder_name(cwd: &str) -> String {
+    Path::new(cwd).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+}
+
 /// Les conversations Claude Code sont des fichiers .jsonl sous ~/.claude/projects ;
 /// la plus récemment écrite est celle où l'on vient de discuter.
-pub fn recent_conversations(count: usize) -> Vec<Conversation> {
+fn jsonl_conversations(count: usize) -> Vec<Conversation> {
     let home = std::env::var("USERPROFILE").unwrap_or_default();
     let root = Path::new(&home).join(".claude").join("projects");
     let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();

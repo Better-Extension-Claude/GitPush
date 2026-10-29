@@ -158,9 +158,6 @@ impl eframe::App for App {
                 crate::debug("bouton : ouverture");
                 self.open_modal(ctx);
             }
-            if self.drag.is_none() {
-                resp.on_hover_text("Pousser ce projet sur GitHub (clic droit maintenu pour déplacer)");
-            }
         });
 
         // La fenêtre GitPush : une fenêtre Windows normale, centrée sur Claude à l'ouverture.
@@ -246,7 +243,7 @@ impl Modal {
         let (tx, rx) = channel();
         let t = Instant::now();
         let convs = data::recent_conversations(25);
-        crate::debug(format!("modal : {} conversations lues en {:?}", convs.len(), t.elapsed()));
+        crate::debug(format!("modal : {} conversations lues en {:?}, affichée : {}", convs.len(), t.elapsed(), convs.first().map(|c| c.label()).unwrap_or_default()));
         let mut m = Modal {
             ctx: ctx.clone(),
             tx,
