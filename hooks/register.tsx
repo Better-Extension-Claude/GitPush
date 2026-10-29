@@ -157,12 +157,27 @@ async function existing($: $, sel: string[]) {
   return kept
 }
 
+// Sans nom ni email git, on prend le compte GitHub de gh et son adresse noreply.
+async function ensureIdentity($: $) {
+  if ((await git($, ['config', 'user.email'])).stdout.trim()) {
+    return
+  }
+  const me = await $.process
+    .run(['gh', 'api', 'user', '-q', '.id,.login'], { timeoutMs: 30_000 })
+    .catch(() => null)
+  const [id, login] = (me?.exitCode === 0 ? me.stdout : '').split('\n').map(s => s.trim())
+  if (id && login) {
+    await git($, ['config', 'user.name', login])
+    await git($, ['config', 'user.email', `${id}+${login}@users.noreply.github.com`])
+  }
+}
+
 async function push($: $, isForced = false): Promise<string> {
   const cfg = await read($, cfgAtom)
   const sel = await existing($, await read($, selAtom))
   const view = await read($, viewAtom)
   if (!cfg?.remote) {
-    return 'Aucun dépôt configuré : ouvre « Configurer ».'
+    return 'Aucun dépôt configuré : va dans l’onglet « Dépôt & branche ».'
   }
   if (sel.length === 0) {
     return 'Aucun fichier coché.'
@@ -205,6 +220,7 @@ async function push($: $, isForced = false): Promise<string> {
     return `Déjà à jour sur ${branch}.`
   }
   if (hasChanges || !hasHead) {
+    await ensureIdentity($)
     const message = view.message.trim() || `Mise à jour du ${new Date().toLocaleString('fr-FR')}`
     const committed = await git($, ['commit', '-q', '--allow-empty', '-m', message])
     if (committed.exitCode !== 0) {
