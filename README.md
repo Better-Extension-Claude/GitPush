@@ -7,7 +7,7 @@ Un bouton **↑ GitPush** collé sur la fenêtre de Claude desktop (Windows). Un
 - **Conversation** : celle affichée dans Claude est choisie d'office ; la liste permet d'en prendre une autre.
 - **Dépôt** : un de tes dépôts GitHub, une adresse collée, ou un nouveau dépôt (privé ou public).
 - **Branche** : une branche existante ou un nouveau nom.
-- **Fichiers** : arbre à cocher, pré-coché avec le dernier push, qu'il vienne de toi ou de Claude.
+- **Fichiers** : arbre à cocher, pré-coché avec le dernier push, qu'il vienne de toi ou de Claude. Pour un projet jamais poussé avec GitPush (poussé par Claude, par le site GitHub…, même sans dossier `.git`), choisir le dépôt coche les fichiers déjà en ligne (« ↺ Fichiers du dépôt » pour le refaire).
 - **Pousser** : chaque push envoie exactement les éléments cochés. Un fichier décoché disparaît du dépôt au commit suivant (il reste sur ton disque). **Forcer** apparaît si la branche distante a divergé.
 
 ## Le bouton
@@ -41,7 +41,7 @@ Nécessite aussi `git` : la fenêtre propose **Installer Git** s'il manque.
 
 Le fichier téléchargé peut ensuite être supprimé. Windows peut afficher un avertissement SmartScreen (l'exe n'est pas signé) : « Informations complémentaires » → « Exécuter quand même ».
 
-Mettre à jour : lancer le nouveau `GitPush.exe` et cliquer sur **Mettre à jour**. Désinstaller : lancer `GitPush.exe --install` puis **Désinstaller** (retire aussi le hook).
+Mettre à jour : quand une nouvelle version sort, la fenêtre GitPush affiche **Mettre à jour (vX)** en haut à droite ; le bouton reste là tant qu'on ne l'utilise pas. Un clic télécharge la nouvelle version, ferme la fenêtre, remplace l'exe (hook conservé) et relance le bouton. Depuis une version antérieure à 1.0.2 : lancer le nouveau `GitPush.exe` et cliquer sur **Mettre à jour**. Désinstaller : lancer `GitPush.exe --install` puis **Désinstaller** (retire aussi le hook).
 
 Installation sans fenêtre : `GitPush.exe --install-to "<dossier>"`.
 
