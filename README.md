@@ -11,7 +11,23 @@ Chaque push envoie exactement les éléments cochés : un fichier décoché disp
 
 Nécessite `git`, et `gh` connecté (`gh auth login`) pour lister ou créer des dépôts.
 
-## Installation
+## App GitPush (bouton flottant, dossier `app/`)
+
+Petite app Rust qui colle un bouton **↑ GitPush** sur la fenêtre de Claude desktop. Un clic ouvre un modal par-dessus Claude, déjà relié à la conversation où tu viens d'écrire (liste déroulante pour en choisir une autre) : dépôt, branche, arbre de fichiers pré-cochés selon le dernier push, message, **Pousser**. Le bouton se déplace par glisser-déposer. L'app se ferme toute seule quand Claude est fermé.
+
+Compilation : `bash app/build.sh` (Rust chaîne `stable-x86_64-pc-windows-gnu`).
+
+Démarrage avec Claude : ajouter dans `~/.claude/settings.json`
+
+```json
+"hooks": {
+  "SessionStart": [
+    { "hooks": [ { "type": "command", "command": "C:/Users/<toi>/AppData/Local/GitPush/GitPush.exe", "args": ["--launch"], "timeout": 10 } ] }
+  ]
+}
+```
+
+## Installation du mod
 
 Dans un terminal Claude Code :
 
