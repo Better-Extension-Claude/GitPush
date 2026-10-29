@@ -175,6 +175,39 @@ pub fn focus_modal() {
     }
 }
 
+/// Boîte de dialogue Windows « choisir un dossier » ; bloque jusqu'au choix.
+pub fn pick_folder(title: &str) -> Option<String> {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::UI::Shell::{
+        SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+    };
+    let title = wide(title);
+    let owner_title = wide("Installer GitPush");
+    let mut name = [0u16; 260];
+    unsafe {
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        let info = BROWSEINFOW {
+            hwndOwner: FindWindowW(std::ptr::null(), owner_title.as_ptr()),
+            pidlRoot: std::ptr::null_mut(),
+            pszDisplayName: name.as_mut_ptr(),
+            lpszTitle: title.as_ptr(),
+            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+            lpfn: None,
+            lParam: 0,
+            iImage: 0,
+        };
+        let pidl = SHBrowseForFolderW(&info);
+        if pidl.is_null() {
+            return None;
+        }
+        let mut path = [0u16; 1024];
+        let ok = SHGetPathFromIDListW(pidl, path.as_mut_ptr());
+        CoTaskMemFree(pidl as *const c_void);
+        let len = path.iter().position(|&c| c == 0).unwrap_or(0);
+        (ok != 0 && len > 0).then(|| String::from_utf16_lossy(&path[..len]))
+    }
+}
+
 fn cursor() -> (i32, i32) {
     let mut p = POINT { x: 0, y: 0 };
     unsafe { GetCursorPos(&mut p) };

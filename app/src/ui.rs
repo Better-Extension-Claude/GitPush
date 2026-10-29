@@ -61,7 +61,7 @@ impl eframe::App for ModalApp {
     }
 }
 
-fn setup_style(ctx: &egui::Context) {
+pub fn setup_style(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let fallback = fonts.families[&FontFamily::Proportional].clone();
     let mut load = |key: &str, file: &str| -> bool {
@@ -136,6 +136,8 @@ enum Msg {
     Account(GitHub),
     Login(Login),
     AccountChanged(Result<(), String>),
+    NoGit,
+    Nothing,
 }
 
 struct Modal {
@@ -165,6 +167,7 @@ struct Modal {
     close_at: Option<Instant>,
     account: GitHub,
     is_logging_in: bool,
+    is_git_missing: bool,
 }
 
 enum Action {
@@ -205,9 +208,11 @@ impl Modal {
             close_at: None,
             account: GitHub::Checking,
             is_logging_in: false,
+            is_git_missing: false,
         };
         m.select(0);
         m.check_account();
+        m.spawn(|| if data::tool_available("git") { Msg::Nothing } else { Msg::NoGit });
         m
     }
 
@@ -217,6 +222,14 @@ impl Modal {
 
     /// Compte GitHub de l'app, en haut à droite (mise en page de droite à gauche).
     fn account_badge(&mut self, ui: &mut Ui) {
+        if self.is_git_missing {
+            let text = RichText::new("Installer Git").small().color(Color32::WHITE);
+            if ui.add(egui::Button::new(text).fill(ACCENT)).clicked() {
+                data::winget_install("Git.Git");
+                self.set_status("Installation de Git lancée dans une console. Relance GitPush une fois terminée.", Kind::Info);
+            }
+            ui.add_space(8.0);
+        }
         if self.is_logging_in {
             ui.label(RichText::new("Connexion GitHub en cours…").small().color(SUBTLE));
             return;
@@ -259,7 +272,7 @@ impl Modal {
             GitHub::NoCli => {
                 let text = RichText::new("Installer GitHub CLI").small().color(Color32::WHITE);
                 if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("GitPush se connecte à GitHub avec GitHub CLI (gh).").clicked() {
-                    data::install_github_cli();
+                    data::winget_install("GitHub.cli");
                     self.set_status("Installation lancée dans une console. Relance GitPush une fois terminée.", Kind::Info);
                 }
             }
@@ -429,6 +442,11 @@ impl Modal {
                 }
                 Msg::AccountChanged(Err(e)) => self.set_status(e, Kind::Err),
                 Msg::AccountChanged(Ok(())) => self.check_account(),
+                Msg::NoGit => {
+                    self.is_git_missing = true;
+                    self.set_status("Git n'est pas installé : GitPush en a besoin pour pousser.", Kind::Err);
+                }
+                Msg::Nothing => {}
             }
         }
     }

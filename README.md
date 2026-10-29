@@ -28,25 +28,32 @@ Il passe par [GitHub CLI](https://cli.github.com) (`gh`). Le compte connecté s'
 - Le menu du compte connecté permet de passer d'un compte à l'autre, d'en ajouter un ou de se déconnecter. Les push passent toujours par le compte actif.
 - **Installer GitHub CLI** apparaît si `gh` manque.
 
-Nécessite aussi `git`.
+Nécessite aussi `git` : la fenêtre propose **Installer Git** s'il manque.
 
 ## Installation
 
-Compiler et installer dans `%LOCALAPPDATA%\GitPush\GitPush.exe` (Rust, chaîne `stable-x86_64-pc-windows-gnu`) :
+1. Télécharger `GitPush.exe` dans la dernière [release](../../releases/latest).
+2. Le lancer : c'est l'installateur.
+   - **Dossier** : où copier GitPush (par défaut `%LOCALAPPDATA%\Programs\GitPush`).
+   - **Démarrer avec Claude** : ajoute le hook dans `~/.claude/settings.json`, avec le bon chemin ; le reste du fichier est conservé, et une copie de l'ancien est gardée à côté (`settings.json.gitpush.bak`).
+   - **Prérequis** : Git et GitHub CLI, avec un bouton **Installer** (winget) pour ceux qui manquent.
+3. **Installer** : le bouton apparaît sur Claude.
+
+Le fichier téléchargé peut ensuite être supprimé. Windows peut afficher un avertissement SmartScreen (l'exe n'est pas signé) : « Informations complémentaires » → « Exécuter quand même ».
+
+Mettre à jour : lancer le nouveau `GitPush.exe` et cliquer sur **Mettre à jour**. Désinstaller : lancer `GitPush.exe --install` puis **Désinstaller** (retire aussi le hook).
+
+Installation sans fenêtre : `GitPush.exe --install-to "<dossier>"`.
+
+## Compiler
+
+Rust, chaîne `stable-x86_64-pc-windows-gnu` :
 
 ```bash
 bash app/build.sh
 ```
 
-Démarrer avec Claude : ajouter dans `~/.claude/settings.json`
-
-```json
-"hooks": {
-  "SessionStart": [
-    { "hooks": [ { "type": "command", "command": "C:/Users/<toi>/AppData/Local/GitPush/GitPush.exe", "args": ["--launch"], "timeout": 10 } ] }
-  ]
-}
-```
+L'exe compilé est dans `dist/GitPush.exe`.
 
 ## Dépannage
 

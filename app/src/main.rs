@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod data;
+mod install;
 mod ui;
 mod win;
 
@@ -23,11 +24,18 @@ pub fn debug(msg: impl AsRef<str>) {
     }
 }
 
+/// Modes de GitPush.exe :
+/// - `--launch` (hook de Claude) : relance le bouton détaché, puis rend la main ;
+/// - `--button` : le bouton sur Claude ;
+/// - `--modal` : la fenêtre GitPush, ouverte par le bouton ;
+/// - sans argument : le bouton si c'est la copie installée, sinon l'installateur
+///   (`--install` force l'installateur).
 fn main() {
-    // Lancé par le hook de Claude : on se relance détaché pour que Claude n'attende pas.
-    if std::env::args().any(|a| a == "--launch") {
+    let has = |flag: &str| std::env::args().any(|a| a == flag);
+    if has("--launch") {
         if let Ok(exe) = std::env::current_exe() {
             let _ = Command::new(exe)
+                .arg("--button")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -36,13 +44,25 @@ fn main() {
         }
         return;
     }
-    // La fenêtre GitPush, lancée par le bouton dans son propre processus.
-    if std::env::args().any(|a| a == "--modal") {
+    if has("--modal") {
         if !win::single_instance("Local\\GitPush-fenetre") {
             win::focus_modal();
             return;
         }
         ui::run_modal();
+        return;
+    }
+    // Installation sans fenêtre : `--install-to <dossier>` (hook compris).
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--install-to") {
+        let result = install::install(args.get(i + 1).map(String::as_str).unwrap_or(""), true);
+        debug(format!("installation silencieuse : {:?}", result.as_ref().map(|p| p.display().to_string())));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+    if has("--install") || (!has("--button") && !install::is_installed_copy()) {
+        if win::single_instance("Local\\GitPush-installateur") {
+            install::run_installer();
+        }
         return;
     }
     if !win::single_instance("Local\\GitPush-overlay") {

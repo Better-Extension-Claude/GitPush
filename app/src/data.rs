@@ -27,6 +27,8 @@ pub struct Config {
     /// Position du bouton par rapport au coin haut-gauche de Claude, en pixels.
     pub offset: Option<(i32, i32)>,
     pub projects: HashMap<String, Project>,
+    /// GitPush.exe installé par l'installateur intégré.
+    pub install_path: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -38,7 +40,7 @@ impl Config {
     pub fn load() -> Config {
         fs::read_to_string(config_path())
             .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+            .and_then(|t| serde_json::from_str(t.trim_start_matches('\u{feff}')).ok())
             .unwrap_or_default()
     }
 
@@ -627,10 +629,17 @@ fn open_url(url: &str) {
     let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
-pub fn install_github_cli() {
+/// Vrai si l'outil (`git`, `gh`) se lance.
+pub fn tool_available(exe: &str) -> bool {
+    run(exe, "", Duration::from_secs(10), &["--version"]).ok
+}
+
+/// Installe un logiciel avec winget, dans une console visible (licence et progression).
+/// `id` est une constante du code (Git.Git, GitHub.cli).
+pub fn winget_install(id: &str) {
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
     let _ = Command::new("cmd")
-        .raw_arg("/c winget install --id GitHub.cli -e & pause")
+        .raw_arg(format!("/c winget install --id {id} -e --source winget & pause"))
         .creation_flags(CREATE_NEW_CONSOLE)
         .spawn();
 }
