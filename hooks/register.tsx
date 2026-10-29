@@ -72,7 +72,7 @@ async function loadConfig($: $) {
     }
   }
   await update($, cfgAtom, () => cfg)
-  await update($, selAtom, () => cfg?.selection ?? [])
+  await setSel($, cfg?.selection ?? [])
 }
 
 async function saveConfig($: $, patch: Partial<ProjectConfig>) {
@@ -126,10 +126,56 @@ function checkState(sel: string[], path: string): 'oui' | 'partiel' | 'non' {
   return sel.some(s => isUnder(s, path)) ? 'partiel' : 'non'
 }
 
+// Fichiers que git ignore : ils ne comptent pas pour savoir si un dossier est complet.
+async function ignoredPaths($: $) {
+  const r = await git($, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory']).catch(() => null)
+
+  return new Set((r?.exitCode === 0 ? r.stdout : '').split('\n').map(s => s.trim().replace(/\/$/, '')).filter(Boolean))
+}
+
+// Remplace les fichiers d'un dossier entièrement coché par le dossier lui-même,
+// du plus profond au plus haut, pour qu'il s'affiche coché et non partiel.
+async function normalize($: $, sel: string[]) {
+  const set = new Set(sel)
+  const isCovered = (p: string) => [...set].some(s => s === p || isUnder(p, s))
+  const dirs = new Set<string>()
+  for (const s of sel) {
+    for (let d = parentOf(s); d; d = parentOf(d)) {
+      dirs.add(d)
+    }
+  }
+  if (dirs.size === 0) {
+    return sel
+  }
+  const ignored = await ignoredPaths($)
+  const deepestFirst = [...dirs].sort((a, b) => b.split('/').length - a.split('/').length)
+  for (const dir of deepestFirst) {
+    if (isCovered(dir)) {
+      continue
+    }
+    const children = (await listDir($, dir)).filter(c => !ignored.has(c.path))
+    if (children.length > 0 && children.every(c => isCovered(c.path))) {
+      for (const s of [...set]) {
+        if (isUnder(s, dir)) {
+          set.delete(s)
+        }
+      }
+      set.add(dir)
+    }
+  }
+
+  return [...set]
+}
+
+async function setSel($: $, sel: string[]) {
+  const next = await normalize($, sel)
+  await update($, selAtom, () => next)
+}
+
 async function toggle($: $, path: string) {
   const sel = await read($, selAtom)
   if (checkState(sel, path) !== 'oui') {
-    await update($, selAtom, list => [...list.filter(s => !isUnder(s, path)), path])
+    await setSel($, [...sel.filter(s => !isUnder(s, path)), path])
 
     return
   }
@@ -143,7 +189,7 @@ async function toggle($: $, path: string) {
     next = [...next, ...siblings.map(s => s.path).filter(p => p !== dir)]
     dir = parent
   }
-  await update($, selAtom, () => next)
+  await setSel($, next)
 }
 
 async function existing($: $, sel: string[]) {
@@ -331,7 +377,7 @@ async function recordClaudePush($: $) {
     patch.branch = branch.stdout.trim()
   }
   await saveConfig($, patch)
-  await update($, selAtom, () => selection)
+  await setSel($, selection)
 }
 
 const open = async ($: $) => {
@@ -474,7 +520,7 @@ export const register: Register = on => {
           <Box flexDirection="row" gap={2}>
             <Button key="all" plain dimColor label="Tout cocher" onPress={() => update($, selAtom, () => rows.filter(r => r.depth === 0).map(r => r.path))} />
             <Button key="none" plain dimColor label="Tout décocher" onPress={() => update($, selAtom, () => [])} />
-            <Button key="last" plain dimColor label="↺ Dernier push" onPress={() => update($, selAtom, () => cfg?.selection ?? [])} />
+            <Button key="last" plain dimColor label="↺ Dernier push" onPress={() => setSel($, cfg?.selection ?? [])} />
           </Box>
           {rows.map(row => {
             const state = checkState(sel, row.path)
