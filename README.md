@@ -1,23 +1,44 @@
-# GitPush (push-projet)
+# GitPush
 
-Mod Claude Code pour pousser le projet d'une conversation sur GitHub sans demander à Claude.
+Un bouton **↑ GitPush** collé sur la fenêtre de Claude desktop (Windows). Un clic ouvre la fenêtre GitPush pour la conversation affichée dans Claude, et pousse son projet sur GitHub sans passer par Claude.
 
-- `/push-projet` ouvre une fenêtre au-dessus de la zone de saisie : dépôt, branche, fichiers et dossiers à cocher, message de commit, bouton **Pousser**.
-- Les fichiers sont pré-cochés avec le dernier push, qu'il vienne de toi ou de Claude (un `git push` lancé par Claude est détecté).
-- Onglet **Dépôt & branche** : choisir un de tes dépôts GitHub, une branche existante ou nouvelle, créer/recréer un dépôt (privé ou public).
-- `/push-rapide` pousse tout de suite avec la config du dernier push.
+## La fenêtre GitPush
 
-Chaque push envoie exactement les éléments cochés : un fichier décoché disparaît du dépôt au commit suivant (il reste sur ton disque).
+- **Conversation** : celle affichée dans Claude est choisie d'office ; la liste permet d'en prendre une autre.
+- **Dépôt** : un de tes dépôts GitHub, une adresse collée, ou un nouveau dépôt (privé ou public).
+- **Branche** : une branche existante ou un nouveau nom.
+- **Fichiers** : arbre à cocher, pré-coché avec le dernier push, qu'il vienne de toi ou de Claude.
+- **Pousser** : chaque push envoie exactement les éléments cochés. Un fichier décoché disparaît du dépôt au commit suivant (il reste sur ton disque). **Forcer** apparaît si la branche distante a divergé.
 
-Nécessite `git`, et `gh` connecté (`gh auth login`) pour lister ou créer des dépôts.
+## Le bouton
 
-## App GitPush (bouton flottant, dossier `app/`)
+- Clic gauche : ouvre la fenêtre GitPush.
+- Clic droit maintenu : déplace le bouton ; sa position est retenue.
+- Il se cache pendant que tu déplaces Claude à la souris et revient au lâcher.
+- « Replacer le bouton » et « Quitter GitPush » sont en haut de la fenêtre.
+- Il se ferme tout seul avec Claude.
 
-Petite app Rust qui colle un bouton **↑ GitPush** sur la fenêtre de Claude desktop. Un clic ouvre une fenêtre GitPush séparée, déjà reliée à la conversation où tu viens d'écrire (liste déroulante pour en choisir une autre) : dépôt, branche, arbre de fichiers pré-cochés selon le dernier push, message, **Pousser**. Le bouton se déplace en le glissant au clic droit. L'app se ferme toute seule quand Claude est fermé.
+## Connexion à GitHub
 
-Compilation : `bash app/build.sh` (Rust chaîne `stable-x86_64-pc-windows-gnu`).
+GitPush a son propre accès à GitHub, indépendant de Claude : Claude n'a pas besoin du connecteur GitHub.
 
-Démarrage avec Claude : ajouter dans `~/.claude/settings.json`
+Il passe par [GitHub CLI](https://cli.github.com) (`gh`). Le compte connecté s'affiche en haut à droite de la fenêtre :
+
+- **Connecter GitHub** ouvre une console puis le navigateur pour te connecter, et règle git pour que les push passent par ce compte. GitPush détecte la connexion tout seul.
+- Cliquer sur le compte connecté permet d'en changer.
+- **Installer GitHub CLI** apparaît si `gh` manque.
+
+Nécessite aussi `git`.
+
+## Installation
+
+Compiler et installer dans `%LOCALAPPDATA%\GitPush\GitPush.exe` (Rust, chaîne `stable-x86_64-pc-windows-gnu`) :
+
+```bash
+bash app/build.sh
+```
+
+Démarrer avec Claude : ajouter dans `~/.claude/settings.json`
 
 ```json
 "hooks": {
@@ -27,18 +48,6 @@ Démarrage avec Claude : ajouter dans `~/.claude/settings.json`
 }
 ```
 
-## Installation du mod
+## Dépannage
 
-Dans un terminal Claude Code :
-
-```
-/plugin install push-projet --marketplace zomone/GitPush
-```
-
-Depuis un shell :
-
-```
-claude plugin install push-projet --marketplace zomone/GitPush
-```
-
-Dans l'app desktop : + à côté de la saisie → Plugins → Add marketplace `zomone/GitPush` → Add plugin.
+Lancer GitPush avec la variable d'environnement `GITPUSH_DEBUG=1` écrit un journal dans `%LOCALAPPDATA%\GitPush\debug.log`.

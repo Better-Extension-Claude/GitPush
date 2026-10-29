@@ -1,5 +1,0 @@
-{
-  "name": "gitpush",
-  "owner": { "name": "zomone" },
-  "plugins": [{ "name": "push-projet", "source": "./" }]
-}

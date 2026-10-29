@@ -1,6 +1,0 @@
-{
-  "name": "push-projet",
-  "version": "0.1.0",
-  "description": "Panneau pour pousser le projet sur GitHub (dépôt, branche, fichiers pré-cochés selon le dernier push) sans passer par Claude",
-  "types": "./types/index.d.ts"
-}

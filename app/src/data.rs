@@ -517,6 +517,43 @@ pub fn push(cwd: &str, remote: &str, branch: &str, selection: &[String], message
     }
 }
 
+/// Compte GitHub de l'app : celui de GitHub CLI (`gh`), indépendant de Claude.
+#[derive(Clone, PartialEq)]
+pub enum GitHub {
+    Checking,
+    Connected(String),
+    SignedOut,
+    NoCli,
+}
+
+pub fn github_account() -> GitHub {
+    let r = run("gh", "", Duration::from_secs(20), &["api", "user", "-q", ".login"]);
+    if r.ok && !r.out.trim().is_empty() {
+        GitHub::Connected(r.out.trim().into())
+    } else if r.err.contains("introuvable") {
+        GitHub::NoCli
+    } else {
+        GitHub::SignedOut
+    }
+}
+
+/// Ouvre une console qui connecte `gh` à GitHub (via le navigateur), puis le déclare
+/// comme gestionnaire d'identifiants de git : les push passent alors par ce compte.
+pub fn github_sign_in() {
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    let script = "gh auth login --hostname github.com --git-protocol https --web && gh auth setup-git \
+                  && echo. && echo Connecte : tu peux fermer cette fenetre. & pause";
+    let _ = Command::new("cmd").raw_arg(format!("/c {script}")).creation_flags(CREATE_NEW_CONSOLE).spawn();
+}
+
+pub fn install_github_cli() {
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    let _ = Command::new("cmd")
+        .raw_arg("/c winget install --id GitHub.cli -e & pause")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn();
+}
+
 pub fn my_repos() -> Option<Vec<String>> {
     let r = run("gh", "", Duration::from_secs(60), &["repo", "list", "--limit", "100", "--json", "url", "-q", ".[].url"]);
     r.ok.then(|| lines(&r.out))

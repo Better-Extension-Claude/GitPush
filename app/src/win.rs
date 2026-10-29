@@ -1,5 +1,5 @@
 //! Bouton flottant : une fenêtre Win32 native, « possédée » par Claude, seule sur son fil.
-//! Sans moteur graphique ni rendu à attendre, elle se déplace dès que Windows signale que
+//! Sans moteur graphique ni rendu à attendre, elle se replace dès que Windows signale que
 //! Claude a bougé. La fenêtre GitPush elle-même est un autre processus (`--modal`).
 
 use crate::data::Config;
@@ -31,7 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetCursorPos, GetMessageW, GetWindow, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, ASFW_ANY,
-    EVENT_OBJECT_LOCATIONCHANGE, GWLP_HWNDPARENT, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, OBJID_WINDOW, SWP_NOACTIVATE,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GWLP_HWNDPARENT, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, OBJID_WINDOW, SWP_NOACTIVATE,
     SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
     WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
@@ -275,7 +275,9 @@ fn render(hwnd: HWND, scale: f32, hover: bool) {
 struct Overlay {
     hwnd: HWND,
     claude: HWND,
-    hook: HWINEVENTHOOK,
+    hooks: [HWINEVENTHOOK; 2],
+    /// Claude est déplacé ou redimensionné à la souris : bouton caché jusqu'au lâcher.
+    is_moving: bool,
     offset: (i32, i32),
     scale: f32,
     is_hover: bool,
@@ -319,7 +321,7 @@ impl Overlay {
         }
         self.last_seen = Some(Instant::now());
         self.place();
-        if !self.is_shown {
+        if !self.is_shown && !self.is_moving {
             unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
             self.is_shown = true;
         }
@@ -328,10 +330,13 @@ impl Overlay {
     /// Nouvelle fenêtre Claude : on s'y accroche et on écoute ses déplacements.
     fn attach(&mut self, claude: HWND) {
         unsafe {
-            if !self.hook.is_null() {
-                UnhookWinEvent(self.hook);
-                self.hook = std::ptr::null_mut();
+            for hook in &mut self.hooks {
+                if !hook.is_null() {
+                    UnhookWinEvent(*hook);
+                    *hook = std::ptr::null_mut();
+                }
             }
+            self.is_moving = false;
             self.claude = claude;
             if claude.is_null() {
                 return;
@@ -339,20 +344,28 @@ impl Overlay {
             SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, claude as isize);
             let mut pid = 0u32;
             GetWindowThreadProcessId(claude, &mut pid);
-            self.hook = SetWinEventHook(
-                EVENT_OBJECT_LOCATIONCHANGE,
-                EVENT_OBJECT_LOCATIONCHANGE,
-                std::ptr::null_mut(),
-                Some(on_location),
-                pid,
-                0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-            );
+            // Déplacements sans la souris (agrandir, ancrer) : le bouton suit. Pendant un
+            // glisser à la souris, il se cache pour ne rien demander à Windows en même temps.
+            let ranges = [
+                (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+                (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
+            ];
+            for (hook, (from, to)) in self.hooks.iter_mut().zip(ranges) {
+                *hook = SetWinEventHook(
+                    from,
+                    to,
+                    std::ptr::null_mut(),
+                    Some(on_event),
+                    pid,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
+            }
         }
     }
 
     fn place(&mut self) {
-        if self.claude.is_null() || unsafe { IsIconic(self.claude) } != 0 {
+        if self.claude.is_null() || self.is_moving || unsafe { IsIconic(self.claude) } != 0 {
             return;
         }
         let rect = bounds(self.claude);
@@ -457,15 +470,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     handled.unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam))
 }
 
-unsafe extern "system" fn on_location(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
+unsafe extern "system" fn on_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
     if id_object != OBJID_WINDOW || id_child != 0 {
         return;
     }
     OVERLAY.with(|o| {
-        if let Ok(mut o) = o.try_borrow_mut() {
-            if let Some(o) = o.as_mut().filter(|o| o.claude == hwnd) {
-                o.place();
+        let Ok(mut o) = o.try_borrow_mut() else { return };
+        let Some(o) = o.as_mut().filter(|o| o.claude == hwnd) else { return };
+        match event {
+            EVENT_SYSTEM_MOVESIZESTART => {
+                o.is_moving = true;
+                if o.is_shown {
+                    ShowWindow(o.hwnd, SW_HIDE);
+                    o.is_shown = false;
+                }
             }
+            EVENT_SYSTEM_MOVESIZEEND => {
+                o.is_moving = false;
+                o.place();
+                ShowWindow(o.hwnd, SW_SHOWNOACTIVATE);
+                o.is_shown = true;
+            }
+            _ => o.place(),
         }
     });
 }
@@ -512,7 +538,8 @@ pub fn run_button(offset: (i32, i32)) {
             *o.borrow_mut() = Some(Overlay {
                 hwnd,
                 claude: std::ptr::null_mut(),
-                hook: std::ptr::null_mut(),
+                hooks: [std::ptr::null_mut(); 2],
+                is_moving: false,
                 offset,
                 scale: 1.0,
                 is_hover: false,
