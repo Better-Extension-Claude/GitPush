@@ -137,6 +137,8 @@ enum Msg {
     Login(Login),
     AccountChanged(Result<(), String>),
     NoGit,
+    Update(Option<String>),
+    UpdateStarted(Result<(), String>),
     Nothing,
 }
 
@@ -168,6 +170,9 @@ struct Modal {
     account: GitHub,
     is_logging_in: bool,
     is_git_missing: bool,
+    /// Version plus récente publiée, s'il y en a une.
+    update: Option<String>,
+    is_updating: bool,
 }
 
 enum Action {
@@ -209,10 +214,13 @@ impl Modal {
             account: GitHub::Checking,
             is_logging_in: false,
             is_git_missing: false,
+            update: None,
+            is_updating: false,
         };
         m.select(0);
         m.check_account();
         m.spawn(|| if data::tool_available("git") { Msg::Nothing } else { Msg::NoGit });
+        m.spawn(|| Msg::Update(data::newer_release()));
         m
     }
 
@@ -222,6 +230,22 @@ impl Modal {
 
     /// Compte GitHub de l'app, en haut à droite (mise en page de droite à gauche).
     fn account_badge(&mut self, ui: &mut Ui) {
+        // Nouvelle version publiée : le bouton reste là tant qu'on ne met pas à jour.
+        if let Some(tag) = self.update.clone() {
+            if self.is_updating {
+                ui.spinner();
+                ui.label(RichText::new(format!("Mise à jour vers {tag}…")).small().color(SUBTLE));
+            } else {
+                let text = RichText::new(format!("Mettre à jour ({tag})")).small().color(Color32::WHITE);
+                let hint = "Télécharge la nouvelle version, ferme cette fenêtre et relance le bouton.";
+                if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text(hint).clicked() {
+                    self.is_updating = true;
+                    self.set_status(format!("Téléchargement de GitPush {tag}…"), Kind::Info);
+                    self.spawn(move || Msg::UpdateStarted(data::start_update(&tag)));
+                }
+            }
+            ui.add_space(8.0);
+        }
         if self.is_git_missing {
             let text = RichText::new("Installer Git").small().color(Color32::WHITE);
             if ui.add(egui::Button::new(text).fill(ACCENT)).clicked() {
@@ -447,6 +471,12 @@ impl Modal {
                     self.set_status("Git n'est pas installé : GitPush en a besoin pour pousser.", Kind::Err);
                 }
                 Msg::Nothing => {}
+                Msg::Update(tag) => self.update = tag,
+                Msg::UpdateStarted(Ok(())) => std::process::exit(0),
+                Msg::UpdateStarted(Err(e)) => {
+                    self.is_updating = false;
+                    self.set_status(e, Kind::Err);
+                }
             }
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "gitpush"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "Bouton flottant sur Claude pour pousser le projet d'une conversation sur GitHub"
 

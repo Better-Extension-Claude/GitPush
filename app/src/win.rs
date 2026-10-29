@@ -175,6 +175,19 @@ pub fn focus_modal() {
     }
 }
 
+/// Attend (30 s au plus) la fin d'un processus.
+pub fn wait_for_process(pid: u32) {
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    unsafe {
+        let h = OpenProcess(SYNCHRONIZE, 0, pid);
+        if !h.is_null() {
+            WaitForSingleObject(h, 30_000);
+            CloseHandle(h);
+        }
+    }
+}
+
 /// Boîte de dialogue Windows « choisir un dossier » ; bloque jusqu'au choix.
 pub fn pick_folder(title: &str) -> Option<String> {
     use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};

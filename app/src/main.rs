@@ -53,8 +53,19 @@ fn main() {
         ui::run_modal();
         return;
     }
-    // Installation sans fenêtre : `--install-to <dossier>` (hook compris).
     let args: Vec<String> = std::env::args().collect();
+    let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    // Mise à jour lancée par la fenêtre GitPush : attend qu'elle se ferme, puis remplace
+    // l'exe installé en gardant le hook tel quel, et relance le bouton.
+    if let Some(folder) = value("--update-to") {
+        if let Some(pid) = value("--wait-pid").and_then(|p| p.parse().ok()) {
+            win::wait_for_process(pid);
+        }
+        let result = install::install(&folder, install::current_hook().is_some());
+        debug(format!("mise à jour : {:?}", result.as_ref().map(|p| p.display().to_string())));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+    // Installation sans fenêtre : `--install-to <dossier>` (hook compris).
     if let Some(i) = args.iter().position(|a| a == "--install-to") {
         let result = install::install(args.get(i + 1).map(String::as_str).unwrap_or(""), true);
         debug(format!("installation silencieuse : {:?}", result.as_ref().map(|p| p.display().to_string())));
