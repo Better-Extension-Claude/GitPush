@@ -13,7 +13,7 @@ Nécessite `git`, et `gh` connecté (`gh auth login`) pour lister ou créer des 
 
 ## App GitPush (bouton flottant, dossier `app/`)
 
-Petite app Rust qui colle un bouton **↑ GitPush** sur la fenêtre de Claude desktop. Un clic ouvre un modal par-dessus Claude, déjà relié à la conversation où tu viens d'écrire (liste déroulante pour en choisir une autre) : dépôt, branche, arbre de fichiers pré-cochés selon le dernier push, message, **Pousser**. Le bouton se déplace par glisser-déposer. L'app se ferme toute seule quand Claude est fermé.
+Petite app Rust qui colle un bouton **↑ GitPush** sur la fenêtre de Claude desktop. Un clic ouvre une fenêtre GitPush séparée, déjà reliée à la conversation où tu viens d'écrire (liste déroulante pour en choisir une autre) : dépôt, branche, arbre de fichiers pré-cochés selon le dernier push, message, **Pousser**. Le bouton se déplace en le glissant au clic droit. L'app se ferme toute seule quand Claude est fermé.
 
 Compilation : `bash app/build.sh` (Rust chaîne `stable-x86_64-pc-windows-gnu`).
 

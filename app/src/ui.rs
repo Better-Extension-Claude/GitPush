@@ -40,13 +40,15 @@ impl App {
 
     fn open_modal(&mut self, ctx: &egui::Context) {
         if self.modal.is_some() {
+            ctx.send_viewport_cmd_to(modal_id(), egui::ViewportCommand::Focus);
             return;
         }
         self.modal = Some(Modal::new(ctx));
-        let mut g = self.shared.lock().unwrap();
-        g.modal_open = true;
-        g.focus_modal = true;
     }
+}
+
+fn modal_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("gitpush-modal")
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -143,27 +145,31 @@ impl eframe::App for App {
             resp.on_hover_text("Pousser ce projet sur GitHub (clic droit maintenu pour déplacer)");
         });
 
-        // Le modal, dans sa propre fenêtre collée sur Claude.
+        // La fenêtre GitPush : une fenêtre Windows normale, centrée sur Claude à l'ouverture.
         let App { modal, cfg, shared, .. } = self;
         let mut is_closed = false;
         if let Some(m) = modal.as_mut() {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("gitpush-modal"),
-                egui::ViewportBuilder::default()
-                    .with_title(win::MODAL_TITLE)
-                    .with_position([-4000.0, -4000.0])
-                    .with_inner_size([900.0, 700.0])
-                    .with_decorations(false)
-                    .with_transparent(true)
-                    .with_taskbar(false),
-                |ctx, _class| {
-                    is_closed = m.show(ctx, cfg, shared);
-                },
-            );
+            let (rect, scale) = {
+                let g = shared.lock().unwrap();
+                (g.rect, g.scale.max(1.0))
+            };
+            let size = [800.0_f32, 720.0];
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title(win::MODAL_TITLE)
+                .with_inner_size(size)
+                .with_min_inner_size([520.0, 420.0])
+                .with_active(true);
+            if rect.w > 0 {
+                let x = (rect.x as f32 + (rect.w as f32 - size[0] * scale) / 2.0) / scale;
+                let y = (rect.y as f32 + (rect.h as f32 - size[1] * scale) / 2.0) / scale;
+                builder = builder.with_position([x.max(0.0), y.max(0.0)]);
+            }
+            ctx.show_viewport_immediate(modal_id(), builder, |ctx, _class| {
+                is_closed = m.show(ctx, cfg, shared);
+            });
         }
         if is_closed {
             *modal = None;
-            shared.lock().unwrap().modal_open = false;
         }
     }
 }
@@ -391,31 +397,11 @@ impl Modal {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_black_alpha(140)))
+            .frame(egui::Frame::none().fill(BG).inner_margin(Margin::same(20.0)))
             .show(ctx, |ui| {
-                let screen = ui.max_rect();
-                let w = (screen.width() - 48.0).clamp(320.0, 780.0);
-                let h = (screen.height() - 48.0).clamp(300.0, 680.0);
-                let panel = Rect::from_center_size(screen.center(), vec2(w, h));
-                let backdrop = ui.interact(screen, ui.id().with("backdrop"), Sense::click());
-                if backdrop.clicked() && !backdrop.interact_pointer_pos().map(|p| panel.contains(p)).unwrap_or(true) {
+                if self.contents(ui, cfg, shared) {
                     close = true;
                 }
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(panel), |ui| {
-                    egui::Frame::none()
-                        .fill(BG)
-                        .stroke(Stroke::new(1.0_f32, BORDER))
-                        .rounding(Rounding::same(14.0))
-                        .inner_margin(Margin::same(20.0))
-                        .shadow(egui::epaint::Shadow { offset: vec2(0.0, 8.0), blur: 32.0, spread: 0.0, color: Color32::from_black_alpha(120) })
-                        .show(ui, |ui| {
-                            ui.set_min_size(vec2(w - 40.0, h - 40.0));
-                            ui.set_max_size(vec2(w - 40.0, h - 40.0));
-                            if self.contents(ui, cfg, shared) {
-                                close = true;
-                            }
-                        });
-                });
             });
         close
     }
