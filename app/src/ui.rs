@@ -29,13 +29,14 @@ pub struct App {
     cfg: Config,
     shared: SharedRef,
     drag: Option<((i32, i32), (i32, i32))>,
+    is_pressed: bool,
     modal: Option<Modal>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config, shared: SharedRef) -> App {
         setup_style(&cc.egui_ctx);
-        App { cfg, shared, drag: None, modal: None }
+        App { cfg, shared, drag: None, is_pressed: false, modal: None }
     }
 
     fn open_modal(&mut self, ctx: &egui::Context) {
@@ -119,30 +120,47 @@ impl eframe::App for App {
         // Le bouton flottant.
         egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
             let rect = ui.max_rect();
-            let resp = ui.interact(rect, ui.id().with("gitpush-button"), Sense::click_and_drag());
-            let fill = if resp.hovered() || resp.dragged() { ACCENT_HOVER } else { ACCENT };
+            let resp = ui.interact(rect, ui.id().with("gitpush-button"), Sense::hover());
+            let fill = if resp.hovered() || self.drag.is_some() { ACCENT_HOVER } else { ACCENT };
             ui.painter().rect_filled(rect.shrink(1.0), Rounding::same(rect.height() / 2.0), fill);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, "↑  GitPush", bold(13.5), Color32::WHITE);
-            // Clic droit maintenu : déplacer le bouton.
-            let moving = resp.dragged_by(egui::PointerButton::Secondary);
-            if resp.drag_started_by(egui::PointerButton::Secondary) {
-                let offset = self.shared.lock().unwrap().offset;
-                self.drag = Some((win::cursor(), offset));
+
+            // Clics lus directement dans les événements : egui ignore l'appui qui arrive
+            // dans la même image que l'activation de la fenêtre, d'où des clics perdus.
+            let mut open = false;
+            for e in ctx.input(|i| i.events.clone()) {
+                let egui::Event::PointerButton { pos, button, pressed, .. } = e else { continue };
+                match (button, pressed) {
+                    (egui::PointerButton::Primary, true) => self.is_pressed = rect.contains(pos),
+                    (egui::PointerButton::Primary, false) => {
+                        open = self.is_pressed && rect.contains(pos);
+                        self.is_pressed = false;
+                    }
+                    // Clic droit maintenu : déplacer le bouton.
+                    (egui::PointerButton::Secondary, true) if rect.contains(pos) => {
+                        let offset = self.shared.lock().unwrap().offset;
+                        self.drag = Some((win::cursor(), offset));
+                    }
+                    (egui::PointerButton::Secondary, false) if self.drag.is_some() => {
+                        self.drag = None;
+                        self.cfg.offset = Some(self.shared.lock().unwrap().offset);
+                        self.cfg.save();
+                    }
+                    _ => {}
+                }
             }
-            if let (true, Some((start, offset))) = (moving, self.drag) {
+            if let Some((start, offset)) = self.drag {
                 let now = win::cursor();
                 win::move_button(&self.shared, (offset.0 + now.0 - start.0, offset.1 + now.1 - start.1));
                 ctx.request_repaint();
             }
-            if self.drag.is_some() && !moving {
-                self.drag = None;
-                self.cfg.offset = Some(self.shared.lock().unwrap().offset);
-                self.cfg.save();
-            }
-            if resp.clicked() {
+            if open {
+                crate::debug("bouton : ouverture");
                 self.open_modal(ctx);
             }
-            resp.on_hover_text("Pousser ce projet sur GitHub (clic droit maintenu pour déplacer)");
+            if self.drag.is_none() {
+                resp.on_hover_text("Pousser ce projet sur GitHub (clic droit maintenu pour déplacer)");
+            }
         });
 
         // La fenêtre GitPush : une fenêtre Windows normale, centrée sur Claude à l'ouverture.
@@ -226,7 +244,9 @@ enum Action {
 impl Modal {
     fn new(ctx: &egui::Context) -> Modal {
         let (tx, rx) = channel();
+        let t = Instant::now();
         let convs = data::recent_conversations(25);
+        crate::debug(format!("modal : {} conversations lues en {:?}", convs.len(), t.elapsed()));
         let mut m = Modal {
             ctx: ctx.clone(),
             tx,
