@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, ASFW_ANY,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GWLP_HWNDPARENT, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, OBJID_WINDOW, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
     WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
@@ -170,6 +170,10 @@ pub fn focus_modal() {
     unsafe {
         let m = FindWindowW(std::ptr::null(), title.as_ptr());
         if !m.is_null() {
+            // Réduite dans la barre des tâches : on la rouvre.
+            if IsIconic(m) != 0 {
+                ShowWindow(m, SW_RESTORE);
+            }
             SetForegroundWindow(m);
         }
     }

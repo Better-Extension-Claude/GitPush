@@ -16,7 +16,7 @@ Un bouton **↑ GitPush** collé sur la fenêtre de Claude desktop (Windows). Un
 - Clic gauche : ouvre la fenêtre GitPush.
 - Clic droit maintenu : déplace le bouton ; sa position est retenue.
 - Il se cache pendant que tu déplaces Claude à la souris et revient au lâcher.
-- « Replacer le bouton » et « Quitter GitPush » sont en haut de la fenêtre.
+- « Replacer le bouton » est en haut de la fenêtre GitPush. Celle-ci se déplace par son en-tête et se ferme par sa croix (ou Échap) ; recliquer sur le bouton la ramène devant, même réduite.
 - Il se ferme tout seul avec Claude.
 
 ## Connexion à GitHub

@@ -31,6 +31,8 @@ pub fn run_modal() {
         .with_title(win::MODAL_TITLE)
         .with_inner_size(size)
         .with_min_inner_size([520.0, 420.0])
+        // Sans la barre de Windows : on la déplace par son en-tête et on la ferme par sa croix.
+        .with_decorations(false)
         .with_active(true);
     if let Some((rect, scale)) = win::claude_rect() {
         let x = (rect.x as f32 + (rect.w as f32 - size[0] * scale) / 2.0) / scale;
@@ -46,6 +48,34 @@ pub fn run_modal() {
             Ok(Box::new(ModalApp { modal: Modal::new(&cc.egui_ctx), cfg }))
         }),
     );
+}
+
+/// Croix de fermeture : fond rouge et croix blanche au survol, comme celle de Windows.
+fn close_button(ui: &mut Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 28.0), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        let red = if resp.is_pointer_button_down_on() { Color32::from_rgb(0x94, 0x1e, 0x13) } else { Color32::from_rgb(0xc4, 0x2b, 0x1c) };
+        ui.painter().rect_filled(rect, Rounding::same(6.0), red);
+    }
+    let (c, d) = (rect.center(), 5.5);
+    let stroke = Stroke::new(1.6_f32, if hovered { Color32::WHITE } else { TEXT });
+    ui.painter().line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
+    ui.painter().line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Petit lien de l'en-tête : fond et texte plus clairs au survol.
+fn header_link(ui: &mut Ui, text: &str) -> egui::Response {
+    let font = FontId::proportional(12.5);
+    let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), SUBTLE).size().x;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width + 14.0, 26.0), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter().rect_filled(rect, Rounding::same(6.0), HOVER);
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, if hovered { TEXT } else { SUBTLE });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 struct ModalApp {
@@ -548,7 +578,7 @@ impl Modal {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).inner_margin(Margin::same(20.0)))
+            .frame(egui::Frame::none().fill(BG).stroke(Stroke::new(1.0_f32, BORDER)).inner_margin(Margin::same(20.0)))
             .show(ctx, |ui| {
                 if self.contents(ui, cfg) {
                     close = true;
@@ -560,18 +590,21 @@ impl Modal {
     fn contents(&mut self, ui: &mut Ui, cfg: &mut Config) -> bool {
         let mut close = false;
 
-        // En-tête
+        // En-tête, qui sert aussi de poignée pour déplacer la fenêtre (elle n'a pas de barre de
+        // titre). Créée avant les boutons de l'en-tête, qui passent donc devant elle.
+        let top = ui.max_rect();
+        let handle = Rect::from_min_size(top.min - vec2(20.0, 20.0), vec2(top.width() + 40.0, 58.0));
+        let drag = ui.interact(handle, ui.id().with("deplacer"), Sense::click_and_drag());
+        if drag.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
         ui.horizontal(|ui| {
             ui.label(RichText::new("↑ GitPush").font(bold(22.0)).color(ACCENT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("✕").size(18.0)).frame(false)).on_hover_text("Fermer (Échap)").clicked() {
+                if close_button(ui).on_hover_text("Fermer (Échap)").clicked() {
                     close = true;
                 }
-                if ui.add(egui::Button::new(RichText::new("Quitter GitPush").small().color(SUBTLE)).frame(false)).clicked() {
-                    win::quit_button();
-                    std::process::exit(0);
-                }
-                if ui.add(egui::Button::new(RichText::new("Replacer le bouton").small().color(SUBTLE)).frame(false)).clicked() {
+                if header_link(ui, "Replacer le bouton").clicked() {
                     cfg.offset = None;
                     win::reset_button();
                 }
