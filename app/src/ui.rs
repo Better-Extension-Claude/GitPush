@@ -139,6 +139,7 @@ enum Msg {
     NoGit,
     Update(Option<String>),
     UpdateStarted(Result<(), String>),
+    RemoteFiles { remote: String, auto: bool, result: Option<(Vec<String>, usize, usize)> },
     Nothing,
 }
 
@@ -173,6 +174,8 @@ struct Modal {
     /// Version plus récente publiée, s'il y en a une.
     update: Option<String>,
     is_updating: bool,
+    /// Sélection prise dans le dépôt GitHub : (fichiers présents ici, fichiers en ligne).
+    from_remote: Option<(usize, usize)>,
 }
 
 enum Action {
@@ -216,6 +219,7 @@ impl Modal {
             is_git_missing: false,
             update: None,
             is_updating: false,
+            from_remote: None,
         };
         m.select(0);
         m.check_account();
@@ -337,6 +341,7 @@ impl Modal {
         };
         self.conv = index;
         self.cwd = c.cwd.clone();
+        self.from_remote = None;
         self.cache.clear();
         self.expanded.clear();
         self.sel.clear();
@@ -369,6 +374,17 @@ impl Modal {
         self.project.remote = if url.ends_with(".git") { url.to_string() } else { format!("{url}.git") };
         self.branches.clear();
         self.load_branches();
+        self.load_remote_files(true);
+    }
+
+    /// Pré-coche les fichiers déjà présents dans le dépôt GitHub. `auto` : seulement si le
+    /// projet n'a encore rien de coché (pas de push enregistré).
+    fn load_remote_files(&self, auto: bool) {
+        let (cwd, remote, branch) = (self.cwd.clone(), self.project.remote.clone(), self.project.branch.clone());
+        if remote.trim().is_empty() || (auto && (!self.sel.is_empty() || self.project.last_by.is_some())) {
+            return;
+        }
+        self.spawn(move || Msg::RemoteFiles { result: data::remote_selection(&cwd, &remote, &branch), remote, auto });
     }
 
     fn push(&mut self, force: bool) {
@@ -396,7 +412,19 @@ impl Modal {
                     self.sel = selection;
                     self.is_loading = false;
                     self.load_branches();
+                    self.load_remote_files(true);
                 }
+                Msg::RemoteFiles { remote, auto, result } if remote == self.project.remote => match result {
+                    // Automatique : seulement si rien n'est coché (aucun push enregistré).
+                    Some((files, here, total)) if !auto || self.sel.is_empty() => {
+                        self.sel = files;
+                        self.from_remote = Some((here, total));
+                    }
+                    Some(_) => {}
+                    None if !auto => self.set_status("Impossible de lire les fichiers du dépôt sur GitHub (branche absente ?).", Kind::Err),
+                    None => {}
+                },
+                Msg::RemoteFiles { .. } => {}
                 Msg::Loaded { .. } => {}
                 Msg::Repos(repos) => {
                     self.is_loading_repos = false;
@@ -423,6 +451,7 @@ impl Modal {
                         cfg.projects.insert(cwd, p.clone());
                         cfg.save();
                         self.project = p;
+                        self.from_remote = None;
                         self.message.clear();
                         self.close_at = Some(Instant::now() + Duration::from_millis(1600));
                         self.load_branches();
@@ -636,13 +665,18 @@ impl Modal {
             if link(ui, "Tout décocher") {
                 self.sel.clear();
             }
-            if link(ui, "↺ Dernier push") {
+            if self.project.last_by.is_some() && link(ui, "↺ Dernier push") {
                 self.sel = data::normalize(&self.cwd, self.project.selection.clone(), &self.ignored);
+                self.from_remote = None;
+            }
+            if !self.project.remote.trim().is_empty() && link(ui, "↺ Fichiers du dépôt") {
+                self.load_remote_files(false);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let info = match (&self.project.last_by, &self.project.last_at) {
-                    (Some(by), Some(at)) => format!("pré-coché : dernier push de {by}, {}", short_date(at)),
-                    (Some(by), None) => format!("pré-coché : dernier push de {by}"),
+                let info = match (&self.from_remote, &self.project.last_by, &self.project.last_at) {
+                    (Some((here, total)), _, _) => format!("pré-coché : fichiers déjà sur GitHub ({here} sur {total} présents ici)"),
+                    (None, Some(by), Some(at)) => format!("pré-coché : dernier push de {by}, {}", short_date(at)),
+                    (None, Some(by), None) => format!("pré-coché : dernier push de {by}"),
                     _ => "aucun push enregistré".to_string(),
                 };
                 ui.label(RichText::new(info).small().color(SUBTLE));

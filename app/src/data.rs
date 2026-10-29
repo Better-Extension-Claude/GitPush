@@ -745,6 +745,35 @@ pub fn my_repos() -> Option<Vec<String>> {
     r.ok.then(|| lines(&r.out))
 }
 
+/// « propriétaire/dépôt » d'une adresse GitHub (https ou ssh).
+fn github_slug(remote: &str) -> Option<String> {
+    let rest = remote.trim().split("github.com").nth(1)?.trim_start_matches([':', '/']);
+    let slug = rest.trim_end_matches('/').trim_end_matches(".git");
+    (slug.split('/').count() == 2).then(|| slug.to_string())
+}
+
+/// Fichiers déjà sur la branche du dépôt GitHub (lus par l'API, sans rien télécharger),
+/// réduits à ceux présents dans le projet : de quoi pré-cocher un projet poussé par un
+/// autre moyen (Claude, site GitHub…). Renvoie aussi combien sont présents ici, et en ligne.
+pub fn remote_selection(cwd: &str, remote: &str, branch: &str) -> Option<(Vec<String>, usize, usize)> {
+    let slug = github_slug(remote)?;
+    let branch = if branch.trim().is_empty() { "main" } else { branch.trim() };
+    let r = run(
+        "gh",
+        "",
+        Duration::from_secs(60),
+        &["api", &format!("repos/{slug}/git/trees/{branch}?recursive=1"), "-q", r#".tree[] | select(.type=="blob") | .path"#],
+    );
+    if !r.ok {
+        return None;
+    }
+    let files = lines(&r.out);
+    let total = files.len();
+    let present: Vec<String> = files.into_iter().filter(|f| full(cwd, f).exists()).collect();
+    let here = present.len();
+    Some((normalize(cwd, present, &ignored(cwd)), here, total))
+}
+
 pub fn remote_branches(remote: &str) -> Vec<String> {
     let r = run("git", "", Duration::from_secs(60), &["ls-remote", "--heads", remote]);
     lines(&r.out).iter().filter_map(|l| l.split("refs/heads/").nth(1).map(String::from)).collect()
