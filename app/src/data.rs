@@ -619,7 +619,11 @@ pub fn github_logout(login: &str) -> Result<(), String> {
     }
 }
 
+/// N'ouvre que des pages de github.com : l'adresse vient de la sortie de `gh`.
 fn open_url(url: &str) {
+    if !url.starts_with("https://github.com/") {
+        return;
+    }
     let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
