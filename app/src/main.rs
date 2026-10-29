@@ -31,6 +31,7 @@ pub fn debug(msg: impl AsRef<str>) {
 /// - sans argument : le bouton si c'est la copie installée, sinon l'installateur
 ///   (`--install` force l'installateur).
 fn main() {
+    data::refresh_path();
     let has = |flag: &str| std::env::args().any(|a| a == flag);
     if has("--launch") {
         if let Ok(exe) = std::env::current_exe() {

@@ -209,7 +209,10 @@ impl Installer {
     fn check_tools(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Tools { git: data::tool_available("git"), gh: data::tool_available("gh") });
+            data::refresh_path();
+            let (git, gh) = (data::tool_available("git"), data::tool_available("gh"));
+            crate::debug(format!("installateur : git={git} gh={gh}"));
+            let _ = tx.send(Msg::Tools { git, gh });
             ctx.request_repaint();
         });
     }

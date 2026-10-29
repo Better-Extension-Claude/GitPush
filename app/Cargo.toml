@@ -1,6 +1,6 @@
 [package]
 name = "gitpush"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Bouton flottant sur Claude pour pousser le projet d'une conversation sur GitHub"
 
@@ -19,7 +19,9 @@ features = [
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_System_Com",
+  "Win32_System_Environment",
   "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_UI_Input_KeyboardAndMouse",

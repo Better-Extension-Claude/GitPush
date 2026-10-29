@@ -629,6 +629,64 @@ fn open_url(url: &str) {
     let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
+/// Lit une variable d'environnement dans le registre (`machine` : pour tout le PC), développée.
+fn registry_env(machine: bool, name: &str) -> String {
+    use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (root, key) = if machine {
+        (HKEY_LOCAL_MACHINE, wide(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"))
+    } else {
+        (HKEY_CURRENT_USER, wide("Environment"))
+    };
+    let name = wide(name);
+    let mut buf = vec![0u16; 32768];
+    let mut size = (buf.len() * 2) as u32;
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    let status = unsafe {
+        RegGetValueW(root, key.as_ptr(), name.as_ptr(), flags, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _, &mut size)
+    };
+    if status != 0 {
+        return String::new();
+    }
+    let mut out = vec![0u16; 32768];
+    let n = unsafe { ExpandEnvironmentStringsW(buf.as_ptr(), out.as_mut_ptr(), out.len() as u32) } as usize;
+    String::from_utf16_lossy(&out[..n.saturating_sub(1).min(out.len())])
+}
+
+/// Un programme garde le PATH d'Explorer à son lancement : Git ou GitHub CLI installés
+/// depuis restent introuvables. On relit donc le PATH à jour dans le registre et on ajoute
+/// les dossiers d'installation habituels, pour ce processus et ceux qu'il lance (git, gh).
+pub fn refresh_path() {
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    let mut dirs: Vec<String> = Vec::new();
+    let mut add = |d: &str| {
+        let d = d.trim().trim_end_matches('\\').to_string();
+        if !d.is_empty() && !dirs.iter().any(|x| x.eq_ignore_ascii_case(&d)) {
+            dirs.push(d);
+        }
+    };
+    for d in env("PATH").split(';') {
+        add(d);
+    }
+    for d in registry_env(true, "Path").split(';').chain(registry_env(false, "Path").split(';')) {
+        add(d);
+    }
+    let (pf, local) = (env("ProgramFiles"), env("LOCALAPPDATA"));
+    for d in [
+        format!(r"{pf}\GitHub CLI"),
+        format!(r"{pf}\Git\cmd"),
+        format!(r"{local}\Programs\GitHub CLI"),
+        format!(r"{local}\Programs\Git\cmd"),
+        format!(r"{local}\Microsoft\WinGet\Links"),
+    ] {
+        if Path::new(&d).is_dir() {
+            add(&d);
+        }
+    }
+    std::env::set_var("PATH", dirs.join(";"));
+}
+
 /// Vrai si l'outil (`git`, `gh`) se lance.
 pub fn tool_available(exe: &str) -> bool {
     run(exe, "", Duration::from_secs(10), &["--version"]).ok
