@@ -189,6 +189,9 @@ impl Modal {
         let t = Instant::now();
         let convs = data::recent_conversations(25);
         crate::debug(format!("modal : {} conversations lues en {:?}, affichée : {}", convs.len(), t.elapsed(), convs.first().map(|c| c.label()).unwrap_or_default()));
+        for c in &convs {
+            crate::debug(format!("  {} | clé {} | dossiers {:?} | poussé {}", c.title, c.key, c.folders, c.cwd));
+        }
         let mut m = Modal {
             ctx: ctx.clone(),
             tx,
@@ -340,14 +343,37 @@ impl Modal {
             return;
         };
         self.conv = index;
-        self.cwd = c.cwd.clone();
+        let cwd = c.cwd.clone();
+        self.open_folder(cwd);
+    }
+
+    /// Dossier choisi pour la conversation (liste ou « Autre dossier… »), retenu dans la config.
+    fn choose_folder(&mut self, folder: String, cfg: &mut Config) {
+        let Some(c) = self.convs.get_mut(self.conv) else { return };
+        if !c.folders.iter().any(|f| f.eq_ignore_ascii_case(&folder)) {
+            c.folders.push(folder.clone());
+        }
+        c.cwd = folder.clone();
+        cfg.folders.insert(c.key.clone(), folder.clone());
+        cfg.save();
+        self.open_folder(folder);
+    }
+
+    fn open_folder(&mut self, cwd: String) {
+        self.cwd = cwd;
         self.from_remote = None;
         self.cache.clear();
         self.expanded.clear();
         self.sel.clear();
         self.branches.clear();
         self.is_loading = true;
-        self.set_status("", Kind::Info);
+        let no_folder = self.convs.get(self.conv).map(|c| c.folders.is_empty()).unwrap_or(false)
+            && (self.cwd.contains("scratch-workspaces") || self.cwd.contains("side-session-notes"));
+        if no_folder {
+            self.set_status("Cette conversation n'a pas de dossier de projet : choisis-le avec « Autre dossier… ».", Kind::Info);
+        } else {
+            self.set_status("", Kind::Info);
+        }
         let cwd = self.cwd.clone();
         self.spawn(move || {
             let mut cfg = Config::load();
@@ -570,6 +596,27 @@ impl Modal {
             if let Some(i) = pick.filter(|i| *i != self.conv) {
                 self.select(i);
             }
+            ui.end_row();
+
+            // Conversation avec plusieurs dossiers, ou sans dossier : on choisit lequel pousser.
+            ui.label(RichText::new("Dossier").color(SUBTLE));
+            ui.horizontal(|ui| {
+                let folders = self.convs.get(self.conv).map(|c| c.folders.clone()).unwrap_or_default();
+                let mut chosen = None;
+                egui::ComboBox::from_id_salt("folder").width(field_w - 140.0).selected_text(self.cwd.clone()).show_ui(ui, |ui| {
+                    for f in &folders {
+                        if ui.selectable_label(f.eq_ignore_ascii_case(&self.cwd), f).clicked() {
+                            chosen = Some(f.clone());
+                        }
+                    }
+                });
+                if ui.button("Autre dossier…").clicked() {
+                    chosen = win::pick_folder("Dossier du projet à pousser", win::MODAL_TITLE);
+                }
+                if let Some(f) = chosen.filter(|f| !f.eq_ignore_ascii_case(&self.cwd)) {
+                    self.choose_folder(f, cfg);
+                }
+            });
             ui.end_row();
 
             ui.label(RichText::new("Dépôt").color(SUBTLE));

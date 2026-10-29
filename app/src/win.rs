@@ -189,13 +189,13 @@ pub fn wait_for_process(pid: u32) {
 }
 
 /// Boîte de dialogue Windows « choisir un dossier » ; bloque jusqu'au choix.
-pub fn pick_folder(title: &str) -> Option<String> {
+pub fn pick_folder(title: &str, owner: &str) -> Option<String> {
     use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
     use windows_sys::Win32::UI::Shell::{
         SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
     };
     let title = wide(title);
-    let owner_title = wide("Installer GitPush");
+    let owner_title = wide(owner);
     let mut name = [0u16; 260];
     unsafe {
         CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);

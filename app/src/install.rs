@@ -271,7 +271,7 @@ impl eframe::App for Installer {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(ui.available_width() - 110.0));
                 if ui.button("Parcourir…").clicked() {
-                    if let Some(dir) = win::pick_folder("Dossier où installer GitPush") {
+                    if let Some(dir) = win::pick_folder("Dossier où installer GitPush", "Installer GitPush") {
                         self.folder = dir;
                     }
                 }

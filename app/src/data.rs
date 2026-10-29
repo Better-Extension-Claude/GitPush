@@ -29,6 +29,8 @@ pub struct Config {
     pub projects: HashMap<String, Project>,
     /// GitPush.exe installé par l'installateur intégré.
     pub install_path: Option<String>,
+    /// Dossier choisi à la main pour une conversation (clé : son dossier de travail d'origine).
+    pub folders: HashMap<String, String>,
 }
 
 fn config_path() -> PathBuf {
@@ -58,37 +60,111 @@ impl Config {
 #[derive(Clone)]
 pub struct Conversation {
     pub title: String,
+    /// Dossier de travail d'origine de la session : clé du dossier choisi dans la config.
+    pub key: String,
+    /// Dossiers du projet : ceux de la conversation (dossier de travail et dossiers ajoutés),
+    /// sans le dossier temporaire vide que Claude crée pour une conversation sans dossier.
+    pub folders: Vec<String>,
+    /// Dossier poussé : celui choisi dans GitPush, sinon le premier de `folders`.
     pub cwd: String,
-    #[allow(dead_code)]
-    pub modified: SystemTime,
 }
 
 impl Conversation {
     pub fn label(&self) -> String {
-        let folder = Path::new(&self.cwd).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-        format!("{}  —  {}", self.title, folder)
+        format!("{}  —  {}", self.title, folder_name(&self.cwd))
+    }
+
+    fn new(title: String, cwd: String, extra: Vec<String>, chosen: &HashMap<String, String>) -> Conversation {
+        let is_scratch = |p: &str| p.contains("scratch-workspaces") || p.contains("side-session-notes");
+        let mut folders: Vec<String> = Vec::new();
+        for f in std::iter::once(cwd.clone()).chain(extra) {
+            if !is_scratch(&f) && Path::new(&f).is_dir() && !folders.iter().any(|x| x.eq_ignore_ascii_case(&f)) {
+                folders.push(f);
+            }
+        }
+        let mut current = folders.first().cloned().unwrap_or_else(|| cwd.clone());
+        if let Some(c) = chosen.get(&cwd).filter(|c| Path::new(c).is_dir()) {
+            if !folders.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+                folders.push(c.clone());
+            }
+            current = c.clone();
+        }
+        Conversation { title, key: cwd, folders, cwd: current }
     }
 }
 
 /// Conversations, celle affichée dans Claude en premier : d'abord les sessions de l'app
 /// desktop (triées par `lastFocusedAt`), puis les .jsonl de Claude Code en complément.
 pub fn recent_conversations(count: usize) -> Vec<Conversation> {
-    let mut list = desktop_sessions(count);
-    for c in jsonl_conversations(count) {
+    let chosen = Config::load().folders;
+    let transcripts = transcript_index();
+    let mut list = desktop_sessions(count, &transcripts, &chosen);
+    for c in jsonl_conversations(count, &transcripts, &chosen) {
         if list.len() >= count {
             break;
         }
-        if !list.iter().any(|d| d.cwd.eq_ignore_ascii_case(&c.cwd)) {
+        if !list.iter().any(|d| d.key.eq_ignore_ascii_case(&c.key)) {
             list.push(c);
         }
     }
     list
 }
 
+/// Transcriptions .jsonl de Claude Code (~/.claude/projects/*/<id>.jsonl), par id de session.
+fn transcript_index() -> HashMap<String, (SystemTime, PathBuf)> {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    let mut index = HashMap::new();
+    for dir in fs::read_dir(Path::new(&home).join(".claude").join("projects")).into_iter().flatten().flatten() {
+        for e in fs::read_dir(dir.path()).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                if let (Some(id), Ok(m)) = (p.file_stem(), e.metadata().and_then(|m| m.modified())) {
+                    index.insert(id.to_string_lossy().to_string(), (m, p.clone()));
+                }
+            }
+        }
+    }
+    index
+}
+
+/// Autres dossiers de la conversation, d'après sa transcription : ceux ajoutés à la session
+/// (« additionalWorkingDirectories »), puis les projets où Claude a écrit des fichiers
+/// (dossier contenant le .git le plus proche, sinon le dossier du fichier), les plus fréquents d'abord.
+fn extra_dirs(transcript: &Path) -> Vec<String> {
+    let (head, tail) = (chunk(transcript, 0, 256 * 1024), chunk_tail(transcript, 512 * 1024));
+    let added_rx = Regex::new(r#""additionalWorkingDirectories":(\[[^\]]*\])"#).unwrap();
+    let find = |text: &str| added_rx.captures_iter(text).last().and_then(|c| serde_json::from_str::<Vec<String>>(&c[1]).ok());
+    let mut dirs = find(&tail).or_else(|| find(&head)).unwrap_or_default();
+
+    let file_rx = Regex::new(r#""file_path":"((?:[^"\\]|\\.)*)""#).unwrap();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for c in file_rx.captures_iter(&head).chain(file_rx.captures_iter(&tail)) {
+        let Ok(file) = serde_json::from_str::<String>(&format!("\"{}\"", &c[1])) else { continue };
+        let lower = file.to_lowercase();
+        if lower.contains("\\appdata\\") || lower.contains("\\.claude\\") {
+            continue;
+        }
+        let Some(parent) = Path::new(&file).parent() else { continue };
+        let root = parent.ancestors().find(|a| a.join(".git").exists()).unwrap_or(parent);
+        let root = root.to_string_lossy().to_string();
+        match counts.iter_mut().find(|(d, _)| d.eq_ignore_ascii_case(&root)) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((root, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    dirs.extend(counts.into_iter().take(3).map(|(d, _)| d));
+    dirs
+}
+
 /// L'app desktop garde une fiche par session :
 /// %LOCALAPPDATA%\Claude-Data\<profil>\claude-code-sessions\<compte>\<org>\local_<id>.json,
 /// avec `lastFocusedAt` mis à jour quand la conversation est affichée.
-fn desktop_sessions(count: usize) -> Vec<Conversation> {
+fn desktop_sessions(
+    count: usize,
+    transcripts: &HashMap<String, (SystemTime, PathBuf)>,
+    chosen: &HashMap<String, String>,
+) -> Vec<Conversation> {
     let mut roots = Vec::new();
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         if let Ok(profiles) = fs::read_dir(Path::new(&local).join("Claude-Data")) {
@@ -99,9 +175,15 @@ fn desktop_sessions(count: usize) -> Vec<Conversation> {
         roots.push(Path::new(&roaming).join("Claude").join("claude-code-sessions"));
     }
     let field = |name: &str| Regex::new(&format!(r#""{name}":("(?:[^"\\]|\\.)*"|[0-9]+|true|false)"#)).unwrap();
-    let (cwd_rx, title_rx, focus_rx, activity_rx, archived_rx) =
-        (field("cwd"), field("title"), field("lastFocusedAt"), field("lastActivityAt"), field("isArchived"));
-    let mut found: Vec<(u64, Conversation)> = Vec::new();
+    let (cwd_rx, title_rx, focus_rx, activity_rx, archived_rx, cli_rx) = (
+        field("cwd"),
+        field("title"),
+        field("lastFocusedAt"),
+        field("lastActivityAt"),
+        field("isArchived"),
+        field("cliSessionId"),
+    );
+    let mut found: Vec<(u64, String, String, Option<PathBuf>)> = Vec::new();
     for root in roots {
         for account in fs::read_dir(&root).into_iter().flatten().flatten() {
             for org in fs::read_dir(account.path()).into_iter().flatten().flatten() {
@@ -123,14 +205,21 @@ fn desktop_sessions(count: usize) -> Vec<Conversation> {
                     }
                     let focus = get(&focus_rx).or_else(|| get(&activity_rx)).and_then(|n| n.parse().ok()).unwrap_or(0);
                     let title = text(&title_rx).filter(|t| !t.is_empty()).unwrap_or_else(|| folder_name(&cwd));
-                    let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-                    found.push((focus, Conversation { title, cwd, modified }));
+                    let transcript = text(&cli_rx).and_then(|id| transcripts.get(&id)).map(|(_, p)| p.clone());
+                    found.push((focus, title, cwd, transcript));
                 }
             }
         }
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
-    found.into_iter().take(count).map(|(_, c)| c).collect()
+    found
+        .into_iter()
+        .take(count)
+        .map(|(_, title, cwd, transcript)| {
+            let extra = transcript.map(|t| extra_dirs(&t)).unwrap_or_default();
+            Conversation::new(title, cwd, extra, chosen)
+        })
+        .collect()
 }
 
 fn folder_name(cwd: &str) -> String {
@@ -139,29 +228,17 @@ fn folder_name(cwd: &str) -> String {
 
 /// Les conversations Claude Code sont des fichiers .jsonl sous ~/.claude/projects ;
 /// la plus récemment écrite est celle où l'on vient de discuter.
-fn jsonl_conversations(count: usize) -> Vec<Conversation> {
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
-    let root = Path::new(&home).join(".claude").join("projects");
-    let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
-    if let Ok(dirs) = fs::read_dir(&root) {
-        for dir in dirs.flatten() {
-            if let Ok(entries) = fs::read_dir(dir.path()) {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
-                        if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
-                            files.push((m, p));
-                        }
-                    }
-                }
-            }
-        }
-    }
+fn jsonl_conversations(
+    count: usize,
+    transcripts: &HashMap<String, (SystemTime, PathBuf)>,
+    chosen: &HashMap<String, String>,
+) -> Vec<Conversation> {
+    let mut files: Vec<(SystemTime, PathBuf)> = transcripts.values().cloned().collect();
     files.sort_by(|a, b| b.0.cmp(&a.0));
     let cwd_rx = Regex::new(r#""cwd":"((?:[^"\\]|\\.)*)""#).unwrap();
     let title_rx = Regex::new(r#""customTitle":"((?:[^"\\]|\\.)*)""#).unwrap();
     let mut list = Vec::new();
-    for (modified, path) in files.into_iter().take(count * 3) {
+    for (_, path) in files.into_iter().take(count * 3) {
         let head = chunk(&path, 0, 128 * 1024);
         let tail = chunk_tail(&path, 512 * 1024);
         let cwd = last_match(&cwd_rx, &tail).or_else(|| last_match(&cwd_rx, &head));
@@ -172,7 +249,7 @@ fn jsonl_conversations(count: usize) -> Vec<Conversation> {
         let title = last_match(&title_rx, &tail)
             .or_else(|| last_match(&title_rx, &head))
             .unwrap_or_else(|| Path::new(&cwd).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default());
-        list.push(Conversation { title, cwd, modified });
+        list.push(Conversation::new(title, cwd, extra_dirs(&path), chosen));
         if list.len() >= count {
             break;
         }
