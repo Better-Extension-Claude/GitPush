@@ -49,6 +49,10 @@ pub fn run_modal() {
         options,
         Box::new(move |cc| {
             setup_style(&cc.egui_ctx);
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(RawWindowHandle::Win32(h)) = cc.window_handle().map(|h| h.as_raw()) {
+                win::round_corners(h.hwnd.get());
+            }
             Ok(Box::new(ModalApp { modal: Modal::new(&cc.egui_ctx), cfg }))
         }),
     );
@@ -70,6 +74,18 @@ fn close_button(ui: &mut Ui) -> egui::Response {
 }
 
 /// Petit lien de l'en-tête : fond et texte plus clairs au survol.
+/// Liste déroulante aux lignes hautes (« Mes dépôts », « Existantes »).
+fn tall_list<R>(id: &str, text: &str, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    egui::ComboBox::from_id_salt(id).width(LIST_W).height(LIST_H).selected_text(text).show_ui(ui, |ui| {
+        ui.spacing_mut().button_padding = vec2(12.0, 10.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(4.0);
+        let r = add(ui);
+        ui.add_space(4.0);
+        r
+    })
+}
+
 fn header_link(ui: &mut Ui, text: &str) -> egui::Response {
     let font = FontId::proportional(12.5);
     let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), SUBTLE).size().x;
@@ -668,7 +684,7 @@ impl Modal {
                     self.set_remote(&remote);
                 }
                 let mut chosen = None;
-                let combo = egui::ComboBox::from_id_salt("repos").width(LIST_W).height(LIST_H).selected_text("Mes dépôts").show_ui(ui, |ui| {
+                let combo = tall_list("repos", "Mes dépôts", ui, |ui| {
                     match &self.repos {
                         None => {
                             ui.label(RichText::new("Chargement…").color(SUBTLE));
@@ -721,7 +737,7 @@ impl Modal {
                 let hint = if self.project.branch.is_empty() { "nom de la nouvelle branche" } else { "main" };
                 let edit = ui.add(egui::TextEdit::singleline(&mut self.project.branch).hint_text(hint).desired_width(field_w - 320.0));
                 let mut chosen = None;
-                egui::ComboBox::from_id_salt("branches").width(LIST_W).height(LIST_H).selected_text("Existantes").show_ui(ui, |ui| {
+                tall_list("branches", "Existantes", ui, |ui| {
                     if self.branches.is_empty() {
                         ui.label(RichText::new("Aucune branche distante").color(SUBTLE));
                     }
@@ -763,16 +779,16 @@ impl Modal {
             if !self.project.remote.trim().is_empty() && link(ui, "↺ Fichiers du dépôt") {
                 self.load_remote_files(false);
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let info = match (&self.from_remote, &self.project.last_by, &self.project.last_at) {
-                    (Some((here, total)), _, _) => format!("pré-coché : fichiers déjà sur GitHub ({here} sur {total} présents ici)"),
-                    (None, Some(by), Some(at)) => format!("pré-coché : dernier push de {by}, {}", short_date(at)),
-                    (None, Some(by), None) => format!("pré-coché : dernier push de {by}"),
-                    _ => "aucun push enregistré".to_string(),
-                };
-                ui.label(RichText::new(info).small().color(SUBTLE));
-            });
         });
+        // Sur sa propre ligne : à côté des liens, le texte se chevauchait.
+        let info = match (&self.from_remote, &self.project.last_by, &self.project.last_at) {
+            (Some((here, total)), _, _) => format!("Pré-coché : fichiers déjà sur GitHub ({here} sur {total} présents ici)"),
+            (None, Some(by), Some(at)) => format!("Pré-coché : dernier push de {by}, {}", short_date(at)),
+            (None, Some(by), None) => format!("Pré-coché : dernier push de {by}"),
+            _ => "Aucun push enregistré".to_string(),
+        };
+        ui.add_space(-4.0);
+        ui.label(RichText::new(info).small().color(SUBTLE));
 
         let tree_h = (ui.available_height() - 96.0).max(80.0);
         egui::Frame::none().fill(FIELD).rounding(Rounding::same(10.0)).inner_margin(Margin::same(6.0)).show(ui, |ui| {

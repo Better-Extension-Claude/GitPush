@@ -204,6 +204,20 @@ pub fn pick_folder(title: &str, owner: &str) -> Option<String> {
     dialog.pick_folder().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Coins arrondis de Windows 11 pour une fenêtre sans barre de titre.
+pub fn round_corners(hwnd: isize) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+    let pref = DWMWCP_ROUND;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd as HWND,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const _ as *const c_void,
+            std::mem::size_of_val(&pref) as u32,
+        );
+    }
+}
+
 struct Owner(std::num::NonZeroIsize);
 
 impl raw_window_handle::HasWindowHandle for Owner {
