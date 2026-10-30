@@ -43,6 +43,13 @@ pub fn run_modal() {
         let y = (rect.y as f32 + (rect.h as f32 - size[1] * scale) / 2.0) / scale;
         viewport = viewport.with_position([x.max(0.0), y.max(0.0)]);
     }
+    // GITPUSH_POS=x,y : ouvre la fenêtre là, sans lui donner le focus (captures en arrière-plan).
+    if let Some((x, y)) = std::env::var("GITPUSH_POS").ok().and_then(|p| {
+        let (x, y) = p.split_once(',')?;
+        Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+    }) {
+        viewport = viewport.with_position([x, y]).with_active(false);
+    }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let _ = eframe::run_native(
         win::MODAL_TITLE,
@@ -76,7 +83,14 @@ fn close_button(ui: &mut Ui) -> egui::Response {
 /// Petit lien de l'en-tête : fond et texte plus clairs au survol.
 /// Liste déroulante aux lignes hautes (« Mes dépôts », « Existantes »).
 fn tall_list<R>(id: &str, text: &str, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    // GITPUSH_OPEN_LIST=<id> garde la liste ouverte : sert à la capturer sans toucher à la souris.
+    if std::env::var("GITPUSH_OPEN_LIST").is_ok_and(|v| v == id) {
+        let popup = ui.make_persistent_id(egui::Id::new(id)).with("popup");
+        ui.memory_mut(|m| m.open_popup(popup));
+    }
     egui::ComboBox::from_id_salt(id).width(LIST_W).height(LIST_H).selected_text(text).show_ui(ui, |ui| {
+        // Toujours haute, même avec peu de lignes ; elle peut recouvrir la liste des fichiers.
+        ui.set_min_height(LIST_H - 20.0);
         ui.spacing_mut().button_padding = vec2(12.0, 10.0);
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.add_space(4.0);
@@ -98,6 +112,27 @@ fn header_link(ui: &mut Ui, text: &str) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Image egui en BMP 32 bits (de haut en bas).
+fn bmp(image: &egui::ColorImage) -> Vec<u8> {
+    let [w, h] = image.size;
+    let mut out = Vec::with_capacity(54 + w * h * 4);
+    let size = (54 + w * h * 4) as u32;
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(-(h as i32)).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&[0; 24]);
+    for p in &image.pixels {
+        out.extend_from_slice(&[p.b(), p.g(), p.r(), 255]);
+    }
+    out
+}
+
 struct ModalApp {
     cfg: Config,
     modal: Modal,
@@ -107,6 +142,23 @@ impl eframe::App for ModalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.modal.show(ctx, &mut self.cfg) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // GITPUSH_SHOT=<fichier.bmp> : capture la fenêtre au bout de 3 s puis la ferme.
+        if let Ok(path) = std::env::var("GITPUSH_SHOT") {
+            let shot = ctx.input(|i| {
+                i.raw.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = shot {
+                let _ = std::fs::write(&path, bmp(&image));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if ctx.input(|i| i.time) > 3.0 && !ctx.data(|d| d.get_temp::<bool>(egui::Id::new("shot")).unwrap_or(false)) {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("shot"), true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            }
+            ctx.request_repaint();
         }
     }
 }
