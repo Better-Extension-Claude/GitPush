@@ -194,34 +194,28 @@ pub fn wait_for_process(pid: u32) {
 
 /// Boîte de dialogue Windows « choisir un dossier » ; bloque jusqu'au choix.
 pub fn pick_folder(title: &str, owner: &str) -> Option<String> {
-    use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
-    use windows_sys::Win32::UI::Shell::{
-        SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
-    };
-    let title = wide(title);
+    // Le sélecteur de dossier de l'explorateur Windows, ouvert par-dessus la fenêtre GitPush.
     let owner_title = wide(owner);
-    let mut name = [0u16; 260];
-    unsafe {
-        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
-        let info = BROWSEINFOW {
-            hwndOwner: FindWindowW(std::ptr::null(), owner_title.as_ptr()),
-            pidlRoot: std::ptr::null_mut(),
-            pszDisplayName: name.as_mut_ptr(),
-            lpszTitle: title.as_ptr(),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-            lpfn: None,
-            lParam: 0,
-            iImage: 0,
-        };
-        let pidl = SHBrowseForFolderW(&info);
-        if pidl.is_null() {
-            return None;
-        }
-        let mut path = [0u16; 1024];
-        let ok = SHGetPathFromIDListW(pidl, path.as_mut_ptr());
-        CoTaskMemFree(pidl as *const c_void);
-        let len = path.iter().position(|&c| c == 0).unwrap_or(0);
-        (ok != 0 && len > 0).then(|| String::from_utf16_lossy(&path[..len]))
+    let owner = unsafe { FindWindowW(std::ptr::null(), owner_title.as_ptr()) };
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if let Some(parent) = std::num::NonZeroIsize::new(owner as isize).map(Owner) {
+        dialog = dialog.set_parent(&parent);
+    }
+    dialog.pick_folder().map(|p| p.to_string_lossy().into_owned())
+}
+
+struct Owner(std::num::NonZeroIsize);
+
+impl raw_window_handle::HasWindowHandle for Owner {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let raw = raw_window_handle::Win32WindowHandle::new(self.0);
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw.into()) })
+    }
+}
+
+impl raw_window_handle::HasDisplayHandle for Owner {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(raw_window_handle::DisplayHandle::windows())
     }
 }
 

@@ -5,9 +5,9 @@ Un bouton **↑ GitPush** collé sur la fenêtre de Claude desktop (Windows). Un
 ## La fenêtre GitPush
 
 - **Conversation** : celle affichée dans Claude est choisie d'office ; la liste permet d'en prendre une autre.
-- **Dossier** : le dossier de la conversation, ou un des dossiers ajoutés à la conversation ou modifiés par Claude ; « Autre dossier… » pour en choisir un autre (retenu pour la suite). Utile pour une conversation sans dossier de projet.
-- **Dépôt** : un de tes dépôts GitHub, une adresse collée, ou un nouveau dépôt (privé ou public).
-- **Branche** : une branche existante ou un nouveau nom.
+- **Dossier** : le dossier de la conversation, ou un des dossiers ajoutés à la conversation ou modifiés par Claude ; « Autre dossier… » ouvre l'explorateur Windows pour en choisir un autre (retenu pour la suite). Utile pour une conversation sans dossier de projet.
+- **Dépôt** : un de tes dépôts GitHub, une adresse collée, ou **Nouveau** pour en créer un (privé ou public).
+- **Branche** : une branche existante, ou **Nouveau** pour taper le nom d'une nouvelle branche (créée au push).
 - **Fichiers** : arbre à cocher, pré-coché avec le dernier push, qu'il vienne de toi ou de Claude. Pour un projet jamais poussé avec GitPush (poussé par Claude, par le site GitHub…, même sans dossier `.git`), choisir le dépôt coche les fichiers déjà en ligne (« ↺ Fichiers du dépôt » pour le refaire).
 - **Pousser** : chaque push envoie exactement les éléments cochés. Un fichier décoché disparaît du dépôt au commit suivant (il reste sur ton disque). **Forcer** apparaît si la branche distante a divergé.
 

@@ -18,6 +18,10 @@ const SUBTLE: Color32 = Color32::from_rgb(0x9a, 0x98, 0x93);
 const ACCENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
 const OK: Color32 = Color32::from_rgb(0x8c, 0xc0, 0x76);
 const ERR: Color32 = Color32::from_rgb(0xe5, 0x6b, 0x5d);
+// Listes déroulantes « Mes dépôts » / « Existantes » et boutons « Nouveau ».
+const LIST_W: f32 = 200.0;
+const LIST_H: f32 = 360.0;
+const NEW_W: f32 = 92.0;
 
 fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
@@ -137,6 +141,7 @@ pub fn setup_style(ctx: &egui::Context) {
     v.widgets.active.weak_bg_fill = Color32::from_rgb(0x48, 0x47, 0x42);
     v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.window_rounding = Rounding::same(10.0);
+    v.menu_rounding = Rounding::same(8.0);
     ctx.set_visuals(v);
     ctx.style_mut(|s| {
         s.spacing.item_spacing = vec2(8.0, 8.0);
@@ -655,7 +660,7 @@ impl Modal {
             ui.label(RichText::new("Dépôt").color(SUBTLE));
             ui.horizontal(|ui| {
                 let mut remote = self.project.remote.clone();
-                let edit = ui.add(egui::TextEdit::singleline(&mut remote).hint_text("https://github.com/moi/projet.git").desired_width(field_w - 250.0));
+                let edit = ui.add(egui::TextEdit::singleline(&mut remote).hint_text("https://github.com/moi/projet.git").desired_width(field_w - 320.0));
                 if edit.changed() {
                     self.project.remote = remote.clone();
                 }
@@ -663,7 +668,7 @@ impl Modal {
                     self.set_remote(&remote);
                 }
                 let mut chosen = None;
-                let combo = egui::ComboBox::from_id_salt("repos").width(120.0).selected_text("Mes dépôts").show_ui(ui, |ui| {
+                let combo = egui::ComboBox::from_id_salt("repos").width(LIST_W).height(LIST_H).selected_text("Mes dépôts").show_ui(ui, |ui| {
                     match &self.repos {
                         None => {
                             ui.label(RichText::new("Chargement…").color(SUBTLE));
@@ -687,8 +692,8 @@ impl Modal {
                 if let Some(url) = chosen {
                     self.set_remote(&url);
                 }
-                let label = if self.is_new_repo_open { "Annuler" } else { "＋ Nouveau" };
-                if ui.button(label).clicked() {
+                let label = if self.is_new_repo_open { "Annuler" } else { "Nouveau" };
+                if ui.add_sized([NEW_W, 30.0], egui::Button::new(label)).clicked() {
                     self.is_new_repo_open = !self.is_new_repo_open;
                 }
             });
@@ -713,9 +718,10 @@ impl Modal {
 
             ui.label(RichText::new("Branche").color(SUBTLE));
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.project.branch).hint_text("main").desired_width(field_w - 250.0));
+                let hint = if self.project.branch.is_empty() { "nom de la nouvelle branche" } else { "main" };
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.project.branch).hint_text(hint).desired_width(field_w - 320.0));
                 let mut chosen = None;
-                egui::ComboBox::from_id_salt("branches").width(120.0).selected_text("Existantes").show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("branches").width(LIST_W).height(LIST_H).selected_text("Existantes").show_ui(ui, |ui| {
                     if self.branches.is_empty() {
                         ui.label(RichText::new("Aucune branche distante").color(SUBTLE));
                     }
@@ -727,6 +733,11 @@ impl Modal {
                 });
                 if let Some(b) = chosen {
                     self.project.branch = b;
+                }
+                // Nouvelle branche : on vide le champ pour taper son nom ; le push la crée.
+                if ui.add_sized([NEW_W, 30.0], egui::Button::new("Nouveau")).on_hover_text("Créée sur GitHub au prochain push").clicked() {
+                    self.project.branch.clear();
+                    edit.request_focus();
                 }
             });
             ui.end_row();
