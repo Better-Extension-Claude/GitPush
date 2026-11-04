@@ -9,4 +9,21 @@ export CARGO_TARGET_DIR="$LOCALAPPDATA/GitPush/build"
 cargo build --release
 mkdir -p ../dist
 cp "$CARGO_TARGET_DIR/release/gitpush.exe" ../dist/GitPush.exe
-echo "Prêt : dist/GitPush.exe"
+# Manifeste BetterClaude : dist/ s'ajoute tel quel comme extension (« Ajouter une extension… »).
+version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+cat > ../dist/extension.json <<JSON
+{
+  "id": "gitpush",
+  "name": "GitPush",
+  "version": "$version",
+  "description": "Envoyez votre projet sur GitHub en un clic, sans passer par Claude.",
+  "exe": "GitPush.exe",
+  "start": ["--button"]
+}
+JSON
+echo "Prêt : dist/GitPush.exe et dist/extension.json"
+# Installe la nouvelle version dans BetterClaude (et la relance si elle est activée).
+# Sorties détournées : le bouton relancé hériterait sinon de celles du script, qui ne
+# rendrait jamais la main.
+"$LOCALAPPDATA/Programs/BetterClaude/BetterClaude.exe" --add "$(cygpath -w "$PWD/../dist/extension.json")" </dev/null >/dev/null 2>&1 \
+  && echo "Installée dans BetterClaude." || echo "Installation dans BetterClaude impossible."

@@ -1,10 +1,14 @@
-//! Bouton flottant : une fenêtre Win32 native, « possédée » par Claude, seule sur son fil.
+//! Bouton flottant : une fenêtre Win32 native, seule sur son fil, posée juste au-dessus de
+//! Claude dans l'ordre des fenêtres. Elle n'est pas « possédée » par Claude : ce lien relie les
+//! files d'entrée des deux processus, et Claude peut se figer si le bouton est tué ou occupé.
 //! Sans moteur graphique ni rendu à attendre, elle se replace dès que Windows signale que
-//! Claude a bougé. La fenêtre GitPush elle-même est un autre processus (`--modal`).
+//! Claude a bougé ou repasse devant. La fenêtre GitPush elle-même est un autre processus (`--modal`).
 
 use crate::data::Config;
+use claude_band::window as band;
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
@@ -21,20 +25,18 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, FindWindowW,
-    GetClassNameW, GetCursorPos, GetMessageW, GetWindow, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, ASFW_ANY,
-    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GWLP_HWNDPARENT, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, OBJID_WINDOW, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE, ULW_ALPHA, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-    WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    GetClassNameW, GetCursorPos, GetMessageW, GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, UpdateLayeredWindow, ASFW_ANY, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_RESTORE, ULW_ALPHA, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 pub const BUTTON_TITLE: &str = "GitPush-bouton";
@@ -156,14 +158,6 @@ pub fn reset_button() {
     }
 }
 
-/// « Quitter GitPush » : ferme aussi le bouton.
-pub fn quit_button() {
-    let b = button_window();
-    if !b.is_null() {
-        unsafe { PostMessageW(b, WM_CLOSE, 0, 0) };
-    }
-}
-
 /// Ramène au premier plan une fenêtre GitPush déjà ouverte.
 pub fn focus_modal() {
     let title = wide(MODAL_TITLE);
@@ -174,6 +168,12 @@ pub fn focus_modal() {
             if IsIconic(m) != 0 {
                 ShowWindow(m, SW_RESTORE);
             }
+            // Ramenée au centre de Claude, là où l'on vient de cliquer (elle a pu rester sur
+            // un autre écran ou derrière une autre fenêtre) : taille actuelle, en points.
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(m, &mut r);
+            let scale = (GetDpiForWindow(m) as f32 / 96.0).max(1.0);
+            center_on_claude(m as isize, [(r.right - r.left) as f32 / scale, (r.bottom - r.top) as f32 / scale]);
             SetForegroundWindow(m);
         }
     }
@@ -202,6 +202,45 @@ pub fn pick_folder(title: &str, owner: &str) -> Option<String> {
         dialog = dialog.set_parent(&parent);
     }
     dialog.pick_folder().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Boîte de message Windows (erreur).
+pub fn message(title: &str, text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+    let (title, text) = (wide(title), wide(text));
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONWARNING) };
+}
+
+/// Centre la fenêtre GitPush (taille logique `size`) sur Claude, en pixels physiques, sans la
+/// laisser déborder de l'écran de Claude. L'écran peut être à gauche de l'écran principal
+/// (coordonnées négatives) : on ne ramène jamais rien à 0.
+pub fn center_on_claude(hwnd: isize, size: [f32; 2]) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let claude = find_claude();
+    if claude.is_null() {
+        return;
+    }
+    let (r, scale) = (bounds(claude), scale_of(claude));
+    let (w, h) = ((size[0] * scale).round() as i32, (size[1] * scale).round() as i32);
+    let mut x = r.x + (r.w - w) / 2;
+    let mut y = r.y + (r.h - h) / 2;
+    unsafe {
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(MonitorFromWindow(claude, MONITOR_DEFAULTTONEAREST), &mut mi) != 0 {
+            let work = mi.rcWork;
+            x = x.min(work.right - w).max(work.left);
+            y = y.min(work.bottom - h).max(work.top);
+        }
+        SetWindowPos(hwnd as HWND, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Boîte de message Windows (information).
+pub fn info(title: &str, text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+    let (title, text) = (wide(title), wide(text));
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION) };
 }
 
 /// Coins arrondis de Windows 11 pour une fenêtre sans barre de titre.
@@ -246,7 +285,8 @@ fn save_offset(offset: Option<(i32, i32)>) {
     cfg.save();
 }
 
-/// Dessine la pastille « ↑ GitPush » (anticrénelée, coins transparents) dans la fenêtre.
+/// Dessine la pastille « ↑ GitPush » (anticrénelée, coins transparents) dans la fenêtre, à la
+/// couleur d'accent du thème de BetterClaude (un peu plus claire au survol).
 fn render(hwnd: HWND, scale: f32, hover: bool) {
     let w = (BUTTON_W * scale).round() as i32;
     let h = (BUTTON_H * scale).round() as i32;
@@ -268,7 +308,9 @@ fn render(hwnd: HWND, scale: f32, hover: bool) {
         }
         let old_bmp = SelectObject(dc, bmp);
         let px = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
-        let fill: u32 = if hover { 0xe38b6e } else { 0xd97757 };
+        let accent = claudeext::theme::current().accent;
+        let a = if hover { accent.mix(claudeext::theme::Rgb(255, 255, 255), 0.12) } else { accent };
+        let fill: u32 = (a.0 as u32) << 16 | (a.1 as u32) << 8 | a.2 as u32;
         px.fill(fill);
 
         let face = wide("Segoe UI");
@@ -333,7 +375,16 @@ fn render(hwnd: HWND, scale: f32, hover: bool) {
 struct Overlay {
     hwnd: HWND,
     claude: HWND,
-    hooks: [HWINEVENTHOOK; 2],
+    /// Suivi de Claude et de l'ordre des fenêtres (claude-band).
+    watch: band::ClaudeWatch,
+    /// Depuis quand le bouton est coincé sous Claude sans rien qui le recouvre.
+    stuck_since: Option<Instant>,
+    /// Encore coincé juste après une relance : incident noté, on attend.
+    gave_up: bool,
+    /// Le clic droit en cours a déplacé le bouton (sinon : retour à la place par défaut).
+    drag_moved: bool,
+    /// Couleur d'accent du dernier dessin : on redessine quand le thème change.
+    accent: claudeext::theme::Rgb,
     /// Claude est déplacé ou redimensionné à la souris : bouton caché jusqu'au lâcher.
     is_moving: bool,
     offset: (i32, i32),
@@ -342,11 +393,41 @@ struct Overlay {
     is_pressed: bool,
     is_shown: bool,
     drag: Option<((i32, i32), (i32, i32))>,
+    /// Dernière position donnée au bouton : on ne le replace que si elle change.
+    pos: Option<(i32, i32)>,
     started: Instant,
     last_seen: Option<Instant>,
     last_search: Instant,
 }
 
+/// Le bouton, pour la remise en ordre que claude-band appelle depuis son propre fil.
+static BUTTON: AtomicIsize = AtomicIsize::new(0);
+
+/// Ordre du bouton (règle commune des extensions, `claude_band::window::order`) : « toujours
+/// au-dessus » tant que rien ne recouvre sa place sur Claude, sinon juste au-dessus de Claude.
+fn order_button(claude: HWND) {
+    let button = BUTTON.load(Ordering::Relaxed) as HWND;
+    let before = band::is_topmost(button);
+    band::order(button, claude);
+    let after = band::is_topmost(button);
+    if before != after || band::is_stuck(button, claude) {
+        crate::debug(format!(
+            "bouton : toujours au-dessus {before} → {after}, coincé={}, Claude dessus={}",
+            band::is_stuck(button, claude),
+            band::is_above(claude, button)
+        ));
+    }
+}
+
+/// Note un incident dans `incidents.log` du dossier de données.
+fn incident(msg: &str) {
+    use std::io::Write;
+    let dir = crate::data_dir();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("incidents.log")) {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = writeln!(f, "{secs}  {msg}");
+    }
+}
 thread_local! {
     static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
 }
@@ -365,7 +446,8 @@ impl Overlay {
         }
         if self.claude.is_null() {
             if self.is_shown {
-                unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+                crate::debug("bouton : caché (Claude introuvable)");
+                band::hide(self.hwnd);
                 self.is_shown = false;
             }
             let gone = match self.last_seen {
@@ -378,48 +460,59 @@ impl Overlay {
             return;
         }
         self.last_seen = Some(Instant::now());
+        // Thème changé dans BetterClaude : la pastille prend le nouvel accent.
+        let accent = claudeext::theme::current().accent;
+        if accent != self.accent {
+            self.accent = accent;
+            render(self.hwnd, self.scale, self.is_hover);
+        }
+        // Claude réduit : le bouton se cache (« toujours au-dessus », il flotterait seul).
+        if unsafe { IsIconic(self.claude) } != 0 {
+            if self.is_shown {
+                band::hide(self.hwnd);
+                self.is_shown = false;
+            }
+            return;
+        }
         self.place();
         if !self.is_shown && !self.is_moving {
-            unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            crate::debug("bouton : affiché");
+            band::show(self.hwnd, self.claude);
             self.is_shown = true;
+            order_button(self.claude);
+        }
+        // Coincé sous Claude alors que rien ne le recouvre (Windows ignore ses changements
+        // d'ordre) : au bout de 3 s, on se relance ; une fenêtre neuve n'a pas le problème.
+        if band::is_stuck(self.hwnd, self.claude) {
+            let since = *self.stuck_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > Duration::from_secs(3) {
+                // Une relance par minute au plus : si la fenêtre neuve est coincée aussi, se
+                // relancer en boucle ne servirait à rien.
+                if relaunched_recently() {
+                    if !self.gave_up {
+                        self.gave_up = true;
+                        incident("bouton toujours coincé après une relance : pas de nouvelle relance avant 1 min");
+                    }
+                } else {
+                    incident("bouton coincé sous Claude depuis 3 s : relance");
+                    relaunch();
+                }
+            }
+        } else {
+            self.stuck_since = None;
+            self.gave_up = false;
         }
     }
 
     /// Nouvelle fenêtre Claude : on s'y accroche et on écoute ses déplacements.
+    /// claude-band écoute Claude (déplacements, glisser à la souris, premier plan) et toutes
+    /// les fenêtres qui pourraient recouvrir le bouton ; il remet l'ordre (`order_button`)
+    /// et nous signale les mouvements de Claude par WM_CLAUDE_MOVED.
     fn attach(&mut self, claude: HWND) {
-        unsafe {
-            for hook in &mut self.hooks {
-                if !hook.is_null() {
-                    UnhookWinEvent(*hook);
-                    *hook = std::ptr::null_mut();
-                }
-            }
-            self.is_moving = false;
-            self.claude = claude;
-            if claude.is_null() {
-                return;
-            }
-            SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, claude as isize);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(claude, &mut pid);
-            // Déplacements sans la souris (agrandir, ancrer) : le bouton suit. Pendant un
-            // glisser à la souris, il se cache pour ne rien demander à Windows en même temps.
-            let ranges = [
-                (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
-                (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
-            ];
-            for (hook, (from, to)) in self.hooks.iter_mut().zip(ranges) {
-                *hook = SetWinEventHook(
-                    from,
-                    to,
-                    std::ptr::null_mut(),
-                    Some(on_event),
-                    pid,
-                    0,
-                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-                );
-            }
-        }
+        crate::debug(format!("bouton : accroché à {:?}", claude));
+        self.is_moving = false;
+        self.claude = claude;
+        self.watch.attach(claude, self.hwnd);
     }
 
     fn place(&mut self) {
@@ -435,7 +528,19 @@ impl Overlay {
         let (w, h) = ((BUTTON_W * scale).round() as i32, (BUTTON_H * scale).round() as i32);
         let x = rect.x + self.offset.0.clamp(0, (rect.w - w).max(0));
         let y = rect.y + self.offset.1.clamp(0, (rect.h - h).max(0));
-        unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+        // Position seulement si elle change ; l'ordre des fenêtres, à part (`order`).
+        if self.pos != Some((x, y)) {
+            crate::debug(format!("bouton : position ({x}, {y})"));
+            self.pos = Some((x, y));
+            unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER) };
+        }
+        order_button(self.claude);
+    }
+
+    fn reset(&mut self) {
+        self.offset = DEFAULT_OFFSET;
+        save_offset(None);
+        self.place();
     }
 
     fn set_hover(&mut self, hover: bool) {
@@ -445,13 +550,35 @@ impl Overlay {
         }
     }
 
-    fn message(&mut self, msg: u32, lparam: LPARAM) -> Option<LRESULT> {
+    fn message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         let inside = || {
             let (x, y) = ((lparam & 0xffff) as i16 as f32, ((lparam >> 16) & 0xffff) as i16 as f32);
             x >= 0.0 && y >= 0.0 && x < BUTTON_W * self.scale && y < BUTTON_H * self.scale
         };
         match msg {
             WM_TIMER => self.tick(),
+            // Claude bouge (0), est saisi à la souris (1), lâché (2), ou passe devant (3).
+            band::WM_CLAUDE_MOVED => match wparam {
+                1 => {
+                    crate::debug("bouton : Claude saisi");
+                    self.is_moving = true;
+                    if self.is_shown {
+                        band::hide(self.hwnd);
+                        self.is_shown = false;
+                    }
+                }
+                2 => {
+                    crate::debug("bouton : Claude lâché");
+                    self.is_moving = false;
+                    self.place();
+                    if unsafe { IsIconic(self.claude) } == 0 {
+                        band::show(self.hwnd, self.claude);
+                        self.is_shown = true;
+                        order_button(self.claude);
+                    }
+                }
+                _ => self.place(),
+            },
             WM_MOUSEACTIVATE => return Some(MA_NOACTIVATE as LRESULT),
             WM_MOUSEMOVE => {
                 if !self.is_hover {
@@ -467,8 +594,13 @@ impl Overlay {
                 // Clic droit maintenu : le bouton suit la souris.
                 if let Some((start, offset)) = self.drag {
                     let now = cursor();
-                    self.offset = (offset.0 + now.0 - start.0, offset.1 + now.1 - start.1);
-                    self.place();
+                    if (now.0 - start.0).abs() + (now.1 - start.1).abs() > 3 {
+                        self.drag_moved = true;
+                    }
+                    if self.drag_moved {
+                        self.offset = (offset.0 + now.0 - start.0, offset.1 + now.1 - start.1);
+                        self.place();
+                    }
                 }
             }
             WM_MOUSELEAVE => {
@@ -484,25 +616,31 @@ impl Overlay {
             }
             WM_RBUTTONDOWN => {
                 self.drag = Some((cursor(), self.offset));
+                self.drag_moved = false;
                 unsafe { SetCapture(self.hwnd) };
             }
             WM_RBUTTONUP => {
                 if self.drag.take().is_some() {
                     unsafe { ReleaseCapture() };
-                    save_offset(Some(self.offset));
+                    if self.drag_moved {
+                        save_offset(Some(self.offset));
+                    } else {
+                        // Clic droit sans bouger : retour à la place par défaut.
+                        self.reset();
+                    }
                 }
             }
             WM_CAPTURECHANGED => {
-                if self.drag.take().is_some() {
+                if self.drag.take().is_some() && self.drag_moved {
                     save_offset(Some(self.offset));
                 }
             }
-            WM_RESET => {
-                self.offset = DEFAULT_OFFSET;
-                save_offset(None);
-                self.place();
-            }
-            WM_CLOSE => std::process::exit(0),
+            WM_RESET => self.reset(),
+            // Fermeture demandée par une autre application : ignorée (le bouton vit avec Claude).
+            WM_CLOSE => {}
+            // Fenêtre détruite quand même : on quitte, sinon le processus garderait le verrou
+            // d'instance unique sans fenêtre, et le bouton ne reviendrait plus.
+            WM_DESTROY => std::process::exit(0),
             _ => return None,
         }
         Some(0)
@@ -522,36 +660,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     // `try_borrow_mut` : SetWindowPos ou ReleaseCapture renvoient des messages pendant
     // qu'on traite déjà le précédent ; ceux-là vont au traitement par défaut.
     let handled = OVERLAY.with(|o| match o.try_borrow_mut() {
-        Ok(mut o) => o.as_mut().filter(|o| o.hwnd == hwnd).and_then(|o| o.message(msg, lparam)),
+        Ok(mut o) => o.as_mut().filter(|o| o.hwnd == hwnd).and_then(|o| o.message(msg, wparam, lparam)),
         Err(_) => None,
     });
     handled.unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam))
-}
-
-unsafe extern "system" fn on_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
-    if id_object != OBJID_WINDOW || id_child != 0 {
-        return;
-    }
-    OVERLAY.with(|o| {
-        let Ok(mut o) = o.try_borrow_mut() else { return };
-        let Some(o) = o.as_mut().filter(|o| o.claude == hwnd) else { return };
-        match event {
-            EVENT_SYSTEM_MOVESIZESTART => {
-                o.is_moving = true;
-                if o.is_shown {
-                    ShowWindow(o.hwnd, SW_HIDE);
-                    o.is_shown = false;
-                }
-            }
-            EVENT_SYSTEM_MOVESIZEEND => {
-                o.is_moving = false;
-                o.place();
-                ShowWindow(o.hwnd, SW_SHOWNOACTIVATE);
-                o.is_shown = true;
-            }
-            _ => o.place(),
-        }
-    });
 }
 
 /// Le bouton : crée la fenêtre et tourne jusqu'à la fermeture de Claude.
@@ -575,7 +687,9 @@ pub fn run_button(offset: (i32, i32)) {
         RegisterClassW(&wc);
         let title = wide(BUTTON_TITLE);
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            // « Toujours au-dessus » dès la création : Windows refuse ensuite de le passer devant
+            // Claude actif (règle claude-band : nos fenêtres ne quittent jamais cette couche).
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
             class.as_ptr(),
             title.as_ptr(),
             WS_POPUP,
@@ -592,11 +706,17 @@ pub fn run_button(offset: (i32, i32)) {
             return;
         }
         render(hwnd, 1.0, false);
+        BUTTON.store(hwnd as isize, Ordering::Relaxed);
+        band::set_order(order_button);
         OVERLAY.with(|o| {
             *o.borrow_mut() = Some(Overlay {
                 hwnd,
                 claude: std::ptr::null_mut(),
-                hooks: [std::ptr::null_mut(); 2],
+                watch: band::ClaudeWatch::default(),
+                stuck_since: None,
+                gave_up: false,
+                drag_moved: false,
+                accent: claudeext::theme::current().accent,
                 is_moving: false,
                 offset,
                 scale: 1.0,
@@ -604,6 +724,7 @@ pub fn run_button(offset: (i32, i32)) {
                 is_pressed: false,
                 is_shown: false,
                 drag: None,
+                pos: None,
                 started: Instant::now(),
                 last_seen: None,
                 last_search: Instant::now() - Duration::from_secs(60),
@@ -616,4 +737,23 @@ pub fn run_button(offset: (i32, i32)) {
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// Relance le bouton dans un nouveau processus, qui attend la fin de celui-ci (verrou
+/// d'instance unique), puis quitte.
+fn relaunch() {
+    if let Ok(exe) = std::env::current_exe() {
+        let pid = std::process::id().to_string();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
+        let _ = std::process::Command::new(exe).args(["--button", "--wait-pid", &pid, "--relaunched-at", &now]).spawn();
+    }
+    std::process::exit(0);
+}
+
+/// Heure (secondes Unix) de la dernière relance, passée par `--relaunched-at`.
+fn relaunched_recently() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|a| a == "--relaunched-at").and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u64>().ok());
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    at.is_some_and(|t| now.saturating_sub(t) < 60)
 }

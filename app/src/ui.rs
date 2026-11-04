@@ -9,15 +9,87 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 
-const BG: Color32 = Color32::from_rgb(0x26, 0x26, 0x24);
-const FIELD: Color32 = Color32::from_rgb(0x1f, 0x1e, 0x1d);
-const HOVER: Color32 = Color32::from_rgb(0x34, 0x33, 0x30);
-const BORDER: Color32 = Color32::from_rgb(0x45, 0x44, 0x3f);
-const TEXT: Color32 = Color32::from_rgb(0xec, 0xeb, 0xe6);
-const SUBTLE: Color32 = Color32::from_rgb(0x9a, 0x98, 0x93);
-const ACCENT: Color32 = Color32::from_rgb(0xd9, 0x77, 0x57);
-const OK: Color32 = Color32::from_rgb(0x8c, 0xc0, 0x76);
-const ERR: Color32 = Color32::from_rgb(0xe5, 0x6b, 0x5d);
+/// Couleurs de la fenêtre : le thème réglé dans BetterClaude (Réglages → Apparence), qui suit
+/// Claude par défaut. Les rôles intermédiaires (survol fort, appui) en sont dérivés.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Palette {
+    pub bg: Color32,
+    pub field: Color32,
+    pub hover: Color32,
+    pub hover_strong: Color32,
+    pub active: Color32,
+    pub border: Color32,
+    pub text: Color32,
+    pub subtle: Color32,
+    pub accent: Color32,
+    pub ok: Color32,
+    pub err: Color32,
+}
+
+fn c(rgb: claudeext::theme::Rgb) -> Color32 {
+    Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+}
+
+impl Palette {
+    fn from_sdk(p: &claudeext::theme::Palette) -> Palette {
+        let mix = |a: claudeext::theme::Rgb, t: f32| c(a.mix(p.texte, t));
+        Palette {
+            bg: c(p.fond),
+            field: c(p.champ),
+            hover: c(p.survol),
+            hover_strong: mix(p.survol, 0.06),
+            active: mix(p.survol, 0.12),
+            border: c(p.bordure),
+            text: c(p.texte),
+            subtle: c(p.texte_secondaire),
+            accent: c(p.accent),
+            ok: c(p.succes),
+            err: c(p.erreur),
+        }
+    }
+}
+
+/// Thème en cours : (sombre ?, palette).
+static THEME: std::sync::RwLock<Option<(bool, Palette)>> = std::sync::RwLock::new(None);
+
+/// Thème à suivre : GITPUSH_THEME=light|dark (captures de test), sinon celui de BetterClaude.
+fn read_theme() -> (bool, Palette) {
+    use claudeext::theme;
+    match std::env::var("GITPUSH_THEME").as_deref() {
+        Ok("light") => (false, Palette::from_sdk(&theme::Palette::clair())),
+        Ok("dark") => (true, Palette::from_sdk(&theme::Palette::sombre())),
+        _ => (theme::is_dark(), Palette::from_sdk(&theme::current())),
+    }
+}
+
+fn theme() -> (bool, Palette) {
+    if let Some(t) = *THEME.read().unwrap_or_else(|e| e.into_inner()) {
+        return t;
+    }
+    let t = read_theme();
+    *THEME.write().unwrap_or_else(|e| e.into_inner()) = Some(t);
+    t
+}
+
+pub fn pal() -> Palette {
+    theme().1
+}
+
+/// Suit le thème de BetterClaude : relu toutes les secondes, couleurs changées à la volée.
+pub fn follow_theme(ctx: &egui::Context) {
+    let id = egui::Id::new("theme-checked");
+    let now = ctx.input(|i| i.time);
+    let last = ctx.data(|d| d.get_temp::<f64>(id));
+    if last.is_none_or(|t| now - t >= 1.0) {
+        ctx.data_mut(|d| d.insert_temp(id, now));
+        let fresh = read_theme();
+        let old = THEME.write().unwrap_or_else(|e| e.into_inner()).replace(fresh);
+        if old != Some(fresh) || last.is_none() {
+            apply_visuals(ctx);
+        }
+    }
+    ctx.request_repaint_after(Duration::from_secs(1));
+}
 // Listes déroulantes « Mes dépôts » / « Existantes » et boutons « Nouveau ».
 const LIST_W: f32 = 200.0;
 const LIST_H: f32 = 360.0;
@@ -41,7 +113,8 @@ pub fn run_modal() {
     if let Some((rect, scale)) = win::claude_rect() {
         let x = (rect.x as f32 + (rect.w as f32 - size[0] * scale) / 2.0) / scale;
         let y = (rect.y as f32 + (rect.h as f32 - size[1] * scale) / 2.0) / scale;
-        viewport = viewport.with_position([x.max(0.0), y.max(0.0)]);
+        // Pas de x.max(0) : l'écran de Claude peut être à gauche (coordonnées négatives).
+        viewport = viewport.with_position([x, y]);
     }
     // GITPUSH_POS=x,y : ouvre la fenêtre là, sans lui donner le focus (captures en arrière-plan).
     if let Some((x, y)) = std::env::var("GITPUSH_POS").ok().and_then(|p| {
@@ -49,6 +122,10 @@ pub fn run_modal() {
         Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
     }) {
         viewport = viewport.with_position([x, y]).with_active(false);
+    }
+    // GITPUSH_INACTIVE : ouverte à sa place normale, sans prendre le focus (tests).
+    if std::env::var_os("GITPUSH_INACTIVE").is_some() {
+        viewport = viewport.with_active(false);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let _ = eframe::run_native(
@@ -59,6 +136,10 @@ pub fn run_modal() {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(RawWindowHandle::Win32(h)) = cc.window_handle().map(|h| h.as_raw()) {
                 win::round_corners(h.hwnd.get());
+                // Position définitive en pixels physiques, sur l'écran de Claude.
+                if std::env::var_os("GITPUSH_POS").is_none() {
+                    win::center_on_claude(h.hwnd.get(), size);
+                }
             }
             Ok(Box::new(ModalApp { modal: Modal::new(&cc.egui_ctx), cfg }))
         }),
@@ -74,7 +155,7 @@ fn close_button(ui: &mut Ui) -> egui::Response {
         ui.painter().rect_filled(rect, Rounding::same(6.0), red);
     }
     let (c, d) = (rect.center(), 5.5);
-    let stroke = Stroke::new(1.6_f32, if hovered { Color32::WHITE } else { TEXT });
+    let stroke = Stroke::new(1.6_f32, if hovered { Color32::WHITE } else { pal().text });
     ui.painter().line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
     ui.painter().line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -102,13 +183,13 @@ fn tall_list<R>(id: &str, text: &str, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> 
 
 fn header_link(ui: &mut Ui, text: &str) -> egui::Response {
     let font = FontId::proportional(12.5);
-    let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), SUBTLE).size().x;
+    let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), pal().subtle).size().x;
     let (rect, resp) = ui.allocate_exact_size(vec2(width + 14.0, 26.0), Sense::click());
     let hovered = resp.hovered();
     if hovered {
-        ui.painter().rect_filled(rect, Rounding::same(6.0), HOVER);
+        ui.painter().rect_filled(rect, Rounding::same(6.0), pal().hover);
     }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, if hovered { TEXT } else { SUBTLE });
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, if hovered { pal().text } else { pal().subtle });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -140,6 +221,7 @@ struct ModalApp {
 
 impl eframe::App for ModalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        follow_theme(ctx);
         if self.modal.show(ctx, &mut self.cfg) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -190,27 +272,7 @@ pub fn setup_style(ctx: &egui::Context) {
     bold_family.extend(fallback);
     fonts.families.insert(FontFamily::Name("bold".into()), bold_family);
     ctx.set_fonts(fonts);
-
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = BG;
-    v.extreme_bg_color = FIELD;
-    v.override_text_color = Some(TEXT);
-    v.selection.bg_fill = ACCENT.linear_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.rounding = Rounding::same(7.0);
-    }
-    v.widgets.inactive.weak_bg_fill = HOVER;
-    v.widgets.inactive.bg_fill = FIELD;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x3d, 0x3c, 0x38);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, SUBTLE);
-    v.widgets.active.weak_bg_fill = Color32::from_rgb(0x48, 0x47, 0x42);
-    v.window_stroke = Stroke::new(1.0_f32, BORDER);
-    v.window_rounding = Rounding::same(10.0);
-    v.menu_rounding = Rounding::same(8.0);
-    ctx.set_visuals(v);
+    apply_visuals(ctx);
     ctx.style_mut(|s| {
         s.spacing.item_spacing = vec2(8.0, 8.0);
         s.spacing.button_padding = vec2(12.0, 6.0);
@@ -219,6 +281,34 @@ pub fn setup_style(ctx: &egui::Context) {
         s.text_styles.insert(egui::TextStyle::Button, FontId::proportional(14.5));
         s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(12.5));
     });
+}
+
+/// Couleurs des widgets egui, d'après la palette du thème en cours.
+fn apply_visuals(ctx: &egui::Context) {
+    let p = pal();
+    let mut v = if theme().0 { egui::Visuals::dark() } else { egui::Visuals::light() };
+    v.panel_fill = p.bg;
+    v.window_fill = p.bg;
+    v.extreme_bg_color = p.field;
+    v.faint_bg_color = p.hover;
+    v.override_text_color = Some(p.text);
+    v.selection.bg_fill = p.accent.linear_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0_f32, p.accent);
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.rounding = Rounding::same(7.0);
+    }
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border);
+    v.widgets.inactive.weak_bg_fill = p.hover;
+    v.widgets.inactive.bg_fill = p.field;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
+    v.widgets.hovered.weak_bg_fill = p.hover_strong;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.subtle);
+    v.widgets.active.weak_bg_fill = p.active;
+    v.widgets.open.weak_bg_fill = p.hover_strong;
+    v.window_stroke = Stroke::new(1.0_f32, p.border);
+    v.window_rounding = Rounding::same(10.0);
+    v.menu_rounding = Rounding::same(8.0);
+    ctx.set_visuals(v);
 }
 
 // ---------------------------------------------------------------- Modal
@@ -240,8 +330,6 @@ enum Msg {
     Login(Login),
     AccountChanged(Result<(), String>),
     NoGit,
-    Update(Option<String>),
-    UpdateStarted(Result<(), String>),
     RemoteFiles { remote: String, auto: bool, result: Option<(Vec<String>, usize, usize)> },
     Nothing,
 }
@@ -274,9 +362,6 @@ struct Modal {
     account: GitHub,
     is_logging_in: bool,
     is_git_missing: bool,
-    /// Version plus récente publiée, s'il y en a une.
-    update: Option<String>,
-    is_updating: bool,
     /// Sélection prise dans le dépôt GitHub : (fichiers présents ici, fichiers en ligne).
     from_remote: Option<(usize, usize)>,
 }
@@ -323,14 +408,11 @@ impl Modal {
             account: GitHub::Checking,
             is_logging_in: false,
             is_git_missing: false,
-            update: None,
-            is_updating: false,
             from_remote: None,
         };
         m.select(0);
         m.check_account();
         m.spawn(|| if data::tool_available("git") { Msg::Nothing } else { Msg::NoGit });
-        m.spawn(|| Msg::Update(data::newer_release()));
         m
     }
 
@@ -340,46 +422,30 @@ impl Modal {
 
     /// Compte GitHub de l'app, en haut à droite (mise en page de droite à gauche).
     fn account_badge(&mut self, ui: &mut Ui) {
-        // Nouvelle version publiée : le bouton reste là tant qu'on ne met pas à jour.
-        if let Some(tag) = self.update.clone() {
-            if self.is_updating {
-                ui.spinner();
-                ui.label(RichText::new(format!("Mise à jour vers {tag}…")).small().color(SUBTLE));
-            } else {
-                let text = RichText::new(format!("Mettre à jour ({tag})")).small().color(Color32::WHITE);
-                let hint = "Télécharge la nouvelle version, ferme cette fenêtre et relance le bouton.";
-                if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text(hint).clicked() {
-                    self.is_updating = true;
-                    self.set_status(format!("Téléchargement de GitPush {tag}…"), Kind::Info);
-                    self.spawn(move || Msg::UpdateStarted(data::start_update(&tag)));
-                }
-            }
-            ui.add_space(8.0);
-        }
         if self.is_git_missing {
             let text = RichText::new("Installer Git").small().color(Color32::WHITE);
-            if ui.add(egui::Button::new(text).fill(ACCENT)).clicked() {
+            if ui.add(egui::Button::new(text).fill(pal().accent)).clicked() {
                 data::winget_install("Git.Git");
-                self.set_status("Installation de Git lancée dans une console. Relance GitPush une fois terminée.", Kind::Info);
+                self.set_status("Installation de Git lancée dans une console. Rouvrez GitPush une fois terminée.", Kind::Info);
             }
             ui.add_space(8.0);
         }
         if self.is_logging_in {
-            ui.label(RichText::new("Connexion GitHub en cours…").small().color(SUBTLE));
+            ui.label(RichText::new("Connexion GitHub en cours…").small().color(pal().subtle));
             return;
         }
         match self.account.clone() {
             GitHub::Checking => {
-                ui.label(RichText::new("GitHub…").small().color(SUBTLE));
+                ui.label(RichText::new("GitHub…").small().color(pal().subtle));
             }
             GitHub::Connected { login, accounts } => {
-                let text = RichText::new(format!("●  GitHub : {login}  ▾")).small().color(OK);
+                let text = RichText::new(format!("●  GitHub : {login}  ▾")).small().color(pal().ok);
                 ui.menu_button(text, |ui| {
-                    ui.label(RichText::new("Compte utilisé pour les push, indépendant de Claude").small().color(SUBTLE));
+                    ui.label(RichText::new("Compte utilisé pour les push, indépendant de Claude").small().color(pal().subtle));
                     ui.separator();
                     for account in &accounts {
                         if account == &login {
-                            ui.label(RichText::new(format!("✓  {account}")).color(OK));
+                            ui.label(RichText::new(format!("✓  {account}")).color(pal().ok));
                         } else if ui.button(format!("Utiliser {account}")).clicked() {
                             let account = account.clone();
                             self.spawn(move || Msg::AccountChanged(data::github_switch(&account)));
@@ -399,15 +465,15 @@ impl Modal {
             }
             GitHub::SignedOut => {
                 let text = RichText::new("Connecter GitHub").small().color(Color32::WHITE);
-                if ui.add(egui::Button::new(text).fill(ACCENT)).clicked() {
+                if ui.add(egui::Button::new(text).fill(pal().accent)).clicked() {
                     self.sign_in();
                 }
             }
             GitHub::NoCli => {
                 let text = RichText::new("Installer GitHub CLI").small().color(Color32::WHITE);
-                if ui.add(egui::Button::new(text).fill(ACCENT)).on_hover_text("GitPush se connecte à GitHub avec GitHub CLI (gh).").clicked() {
+                if ui.add(egui::Button::new(text).fill(pal().accent)).on_hover_text("GitPush utilise l’outil GitHub CLI pour se connecter à GitHub.").clicked() {
                     data::winget_install("GitHub.cli");
-                    self.set_status("Installation lancée dans une console. Relance GitPush une fois terminée.", Kind::Info);
+                    self.set_status("Installation lancée dans une console. Rouvrez GitPush une fois terminée.", Kind::Info);
                 }
             }
         }
@@ -473,7 +539,7 @@ impl Modal {
         let no_folder = self.convs.get(self.conv).map(|c| c.folders.is_empty()).unwrap_or(false)
             && (self.cwd.contains("scratch-workspaces") || self.cwd.contains("side-session-notes"));
         if no_folder {
-            self.set_status("Cette conversation n'a pas de dossier de projet : choisis-le avec « Autre dossier… ».", Kind::Info);
+            self.set_status("Cette conversation n’a pas de dossier de projet : choisissez-le avec « Autre dossier… ».", Kind::Info);
         } else {
             self.set_status("", Kind::Info);
         }
@@ -558,7 +624,7 @@ impl Modal {
                 Msg::Repos(repos) => {
                     self.is_loading_repos = false;
                     if repos.is_none() {
-                        self.set_status("Impossible de lister tes dépôts : connecte GitHub (en haut à droite).", Kind::Err);
+                        self.set_status("Impossible de lister vos dépôts : connectez GitHub (en haut à droite).", Kind::Err);
                     }
                     self.repos = repos;
                 }
@@ -610,7 +676,7 @@ impl Modal {
                 }
                 Msg::Login(Login::Code(code)) => {
                     self.set_status(
-                        format!("Code {code} (copié) : colle-le dans la page GitHub ouverte. Pour un autre compte, change de compte sur cette page."),
+                        format!("Code {code} (copié) : collez-le dans la page GitHub ouverte. Pour un autre compte, changez de compte sur cette page."),
                         Kind::Info,
                     );
                 }
@@ -629,12 +695,6 @@ impl Modal {
                     self.set_status("Git n'est pas installé : GitPush en a besoin pour pousser.", Kind::Err);
                 }
                 Msg::Nothing => {}
-                Msg::Update(tag) => self.update = tag,
-                Msg::UpdateStarted(Ok(())) => std::process::exit(0),
-                Msg::UpdateStarted(Err(e)) => {
-                    self.is_updating = false;
-                    self.set_status(e, Kind::Err);
-                }
             }
         }
     }
@@ -651,7 +711,7 @@ impl Modal {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).stroke(Stroke::new(1.0_f32, BORDER)).inner_margin(Margin::same(20.0)))
+            .frame(egui::Frame::none().fill(pal().bg).stroke(Stroke::new(1.0_f32, pal().border)).inner_margin(Margin::same(20.0)))
             .show(ctx, |ui| {
                 if self.contents(ui, cfg) {
                     close = true;
@@ -672,7 +732,7 @@ impl Modal {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("↑ GitPush").font(bold(22.0)).color(ACCENT));
+            ui.label(RichText::new("↑ GitPush").font(bold(22.0)).color(pal().accent));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if close_button(ui).on_hover_text("Fermer (Échap)").clicked() {
                     close = true;
@@ -689,7 +749,7 @@ impl Modal {
 
         let field_w = ui.available_width() - 110.0;
         egui::Grid::new("form").num_columns(2).spacing([14.0, 10.0]).min_col_width(96.0).show(ui, |ui| {
-            ui.label(RichText::new("Conversation").color(SUBTLE));
+            ui.label(RichText::new("Conversation").color(pal().subtle));
             let current = self.convs.get(self.conv).map(|c| c.label()).unwrap_or_default();
             let mut pick = None;
             egui::ComboBox::from_id_salt("conv").width(field_w).selected_text(current).show_ui(ui, |ui| {
@@ -705,7 +765,7 @@ impl Modal {
             ui.end_row();
 
             // Conversation avec plusieurs dossiers, ou sans dossier : on choisit lequel pousser.
-            ui.label(RichText::new("Dossier").color(SUBTLE));
+            ui.label(RichText::new("Dossier").color(pal().subtle));
             ui.horizontal(|ui| {
                 let folders = self.convs.get(self.conv).map(|c| c.folders.clone()).unwrap_or_default();
                 let mut chosen = None;
@@ -725,7 +785,7 @@ impl Modal {
             });
             ui.end_row();
 
-            ui.label(RichText::new("Dépôt").color(SUBTLE));
+            ui.label(RichText::new("Dépôt").color(pal().subtle));
             ui.horizontal(|ui| {
                 let mut remote = self.project.remote.clone();
                 let edit = ui.add(egui::TextEdit::singleline(&mut remote).hint_text("https://github.com/moi/projet.git").desired_width(field_w - 320.0));
@@ -739,10 +799,10 @@ impl Modal {
                 let combo = tall_list("repos", "Mes dépôts", ui, |ui| {
                     match &self.repos {
                         None => {
-                            ui.label(RichText::new("Chargement…").color(SUBTLE));
+                            ui.label(RichText::new("Chargement…").color(pal().subtle));
                         }
                         Some(list) if list.is_empty() => {
-                            ui.label(RichText::new("Aucun dépôt").color(SUBTLE));
+                            ui.label(RichText::new("Aucun dépôt").color(pal().subtle));
                         }
                         Some(list) => {
                             for url in list {
@@ -784,14 +844,14 @@ impl Modal {
                 ui.end_row();
             }
 
-            ui.label(RichText::new("Branche").color(SUBTLE));
+            ui.label(RichText::new("Branche").color(pal().subtle));
             ui.horizontal(|ui| {
                 let hint = if self.project.branch.is_empty() { "nom de la nouvelle branche" } else { "main" };
                 let edit = ui.add(egui::TextEdit::singleline(&mut self.project.branch).hint_text(hint).desired_width(field_w - 320.0));
                 let mut chosen = None;
                 tall_list("branches", "Existantes", ui, |ui| {
                     if self.branches.is_empty() {
-                        ui.label(RichText::new("Aucune branche distante").color(SUBTLE));
+                        ui.label(RichText::new("Aucune branche distante").color(pal().subtle));
                     }
                     for b in &self.branches {
                         if ui.selectable_label(*b == self.project.branch, b).clicked() {
@@ -815,9 +875,9 @@ impl Modal {
         let mut actions = Vec::new();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Fichiers").font(bold(15.0)));
-            ui.label(RichText::new(format!("{} coché{}", self.sel.len(), if self.sel.len() > 1 { "s" } else { "" })).color(SUBTLE));
+            ui.label(RichText::new(format!("{} coché{}", self.sel.len(), if self.sel.len() > 1 { "s" } else { "" })).color(pal().subtle));
             ui.add_space(8.0);
-            let link = |ui: &mut Ui, t: &str| ui.add(egui::Button::new(RichText::new(t).small().color(ACCENT)).frame(false)).clicked();
+            let link = |ui: &mut Ui, t: &str| ui.add(egui::Button::new(RichText::new(t).small().color(pal().accent)).frame(false)).clicked();
             if link(ui, "Tout cocher") {
                 self.sel = data::list_dir(&self.cwd, "").into_iter().filter(|e| !self.ignored.contains(&e.path)).map(|e| e.path).collect();
             }
@@ -840,15 +900,15 @@ impl Modal {
             _ => "Aucun push enregistré".to_string(),
         };
         ui.add_space(-4.0);
-        ui.label(RichText::new(info).small().color(SUBTLE));
+        ui.label(RichText::new(info).small().color(pal().subtle));
 
         let tree_h = (ui.available_height() - 96.0).max(80.0);
-        egui::Frame::none().fill(FIELD).rounding(Rounding::same(10.0)).inner_margin(Margin::same(6.0)).show(ui, |ui| {
+        egui::Frame::none().fill(pal().field).rounding(Rounding::same(10.0)).inner_margin(Margin::same(6.0)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(tree_h).min_scrolled_height(tree_h).auto_shrink([false, false]).show(ui, |ui| {
                 if self.is_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new("Lecture du projet…").color(SUBTLE));
+                        ui.label(RichText::new("Lecture du projet…").color(pal().subtle));
                     });
                 } else {
                     let mut budget = 3000;
@@ -876,7 +936,7 @@ impl Modal {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let branch = if self.project.branch.trim().is_empty() { "main" } else { self.project.branch.trim() };
                 let label = if self.is_busy { "Push en cours…".to_string() } else { format!("↑  Pousser sur {branch}") };
-                let button = egui::Button::new(RichText::new(label).font(bold(14.5)).color(Color32::WHITE)).fill(ACCENT).min_size(vec2(170.0, 34.0));
+                let button = egui::Button::new(RichText::new(label).font(bold(14.5)).color(Color32::WHITE)).fill(pal().accent).min_size(vec2(170.0, 34.0));
                 if ui.add_enabled(!self.is_busy && !self.is_loading, button).clicked() {
                     self.push(false);
                 }
@@ -887,9 +947,9 @@ impl Modal {
         });
         if !self.status.is_empty() {
             let (icon, color) = match self.kind {
-                Kind::Info => ("…", SUBTLE),
-                Kind::Ok => ("✓", OK),
-                Kind::Err => ("✗", ERR),
+                Kind::Info => ("…", pal().subtle),
+                Kind::Ok => ("✓", pal().ok),
+                Kind::Err => ("✗", pal().err),
             };
             ui.label(RichText::new(format!("{icon} {}", self.status)).color(color));
         }
@@ -900,18 +960,18 @@ impl Modal {
         let cwd = self.cwd.clone();
         let entries = self.cache.entry(dir.to_string()).or_insert_with(|| data::list_dir(&cwd, dir)).clone();
         if entries.is_empty() && depth == 0 {
-            ui.label(RichText::new("Dossier vide.").color(SUBTLE));
+            ui.label(RichText::new("Dossier vide.").color(pal().subtle));
         }
         for e in entries {
             if *budget == 0 {
-                ui.label(RichText::new("… liste tronquée").color(SUBTLE));
+                ui.label(RichText::new("… liste tronquée").color(pal().subtle));
                 return;
             }
             *budget -= 1;
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
             let painter = ui.painter();
             if resp.hovered() {
-                painter.rect_filled(rect, Rounding::same(6.0), HOVER);
+                painter.rect_filled(rect, Rounding::same(6.0), pal().hover);
             }
             let x0 = rect.left() + 6.0 + depth as f32 * 18.0;
             let cy = rect.center().y;
@@ -922,17 +982,17 @@ impl Modal {
                 } else {
                     vec![pos2(x0 + 5.0, cy - 5.0), pos2(x0 + 11.0, cy), pos2(x0 + 5.0, cy + 5.0)]
                 };
-                painter.add(Shape::convex_polygon(pts, SUBTLE, Stroke::NONE));
+                painter.add(Shape::convex_polygon(pts, pal().subtle, Stroke::NONE));
             }
             let state = data::check(&self.sel, &e.path);
             paint_check(painter, Rect::from_min_size(pos2(x0 + 22.0, cy - 8.0), vec2(16.0, 16.0)), state);
             let is_ignored = self.ignored.contains(&e.path);
-            let color = if is_ignored || state == Check::Off { SUBTLE } else { TEXT };
+            let color = if is_ignored || state == Check::Off { pal().subtle } else { pal().text };
             let font = if e.is_dir { bold(14.0) } else { FontId::proportional(14.0) };
             let name = if e.is_dir { format!("{}/", e.name) } else { e.name.clone() };
             painter.text(pos2(x0 + 48.0, cy), Align2::LEFT_CENTER, name, font, color);
             if is_ignored {
-                painter.text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, "ignoré par git", FontId::proportional(12.0), SUBTLE);
+                painter.text(rect.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, "ignoré par git", FontId::proportional(12.0), pal().subtle);
             }
             if resp.clicked() {
                 let x = resp.interact_pointer_pos().map(|p| p.x).unwrap_or(0.0);
@@ -957,10 +1017,10 @@ fn paint_check(painter: &egui::Painter, r: Rect, state: Check) {
     let round = Rounding::same(4.0);
     match state {
         Check::Off => {
-            painter.rect_stroke(r, round, Stroke::new(1.5_f32, SUBTLE));
+            painter.rect_stroke(r, round, Stroke::new(1.5_f32, pal().subtle));
         }
         Check::On => {
-            painter.rect_filled(r, round, ACCENT);
+            painter.rect_filled(r, round, pal().accent);
             let (l, cy) = (r.left(), r.center().y);
             painter.add(Shape::line(
                 vec![pos2(l + 3.5, cy), pos2(l + 6.8, cy + 3.3), pos2(l + 12.5, cy - 3.5)],
@@ -968,8 +1028,8 @@ fn paint_check(painter: &egui::Painter, r: Rect, state: Check) {
             ));
         }
         Check::Partial => {
-            painter.rect_stroke(r, round, Stroke::new(1.5_f32, ACCENT));
-            painter.rect_filled(r.shrink(4.0), Rounding::same(2.0), ACCENT);
+            painter.rect_stroke(r, round, Stroke::new(1.5_f32, pal().accent));
+            painter.rect_filled(r.shrink(4.0), Rounding::same(2.0), pal().accent);
         }
     }
 }

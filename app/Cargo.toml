@@ -1,6 +1,6 @@
 [package]
 name = "gitpush"
-version = "1.0.8"
+version = "1.1.0"
 edition = "2021"
 description = "Bouton flottant sur Claude pour pousser le projet d'une conversation sur GitHub"
 
@@ -11,6 +11,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 rfd = { version = "0.15", default-features = false }
 raw-window-handle = "0.6"
+# Code partagé des fenêtres posées sur Claude (ordre des fenêtres, suivi de Claude).
+claude-band = { path = "../../claude-band" }
+# SDK de BetterClaude : thème réglable, dossier de données de l'extension.
+claudeext = { package = "betterext", path = "../../BetterClaude/sdk" }
 
 [dependencies.windows-sys]
 version = "0.59"

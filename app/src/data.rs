@@ -33,9 +33,17 @@ pub struct Config {
     pub folders: HashMap<String, String>,
 }
 
+/// Réglages : `config.json` du dossier de données de l'extension. Ceux d'avant la 1.1
+/// (`%APPDATA%\GitPush\config.json`) sont repris la première fois.
 fn config_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    Path::new(&base).join("GitPush").join("config.json")
+    let path = crate::data_dir().join("config.json");
+    if !path.exists() {
+        let old = Path::new(&std::env::var("APPDATA").unwrap_or_default()).join("GitPush").join("config.json");
+        if old.exists() {
+            let _ = fs::copy(&old, &path);
+        }
+    }
+    path
 }
 
 impl Config {
@@ -762,44 +770,6 @@ pub fn refresh_path() {
         }
     }
     std::env::set_var("PATH", dirs.join(";"));
-}
-
-/// Dépôt des releases de GitPush (privé : accessible au compte connecté dans `gh`).
-pub const REPO: &str = "zomone/GitPush";
-
-fn version_parts(v: &str) -> Vec<u32> {
-    v.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
-}
-
-/// Version de la dernière release si elle est plus récente que celle-ci.
-pub fn newer_release() -> Option<String> {
-    let r = run("gh", "", Duration::from_secs(20), &["api", &format!("repos/{REPO}/releases/latest"), "-q", ".tag_name"]);
-    let tag = r.out.trim().to_string();
-    crate::debug(format!("dernière release : {tag:?} (celle-ci : {})", env!("CARGO_PKG_VERSION")));
-    (r.ok && version_parts(&tag) > version_parts(env!("CARGO_PKG_VERSION"))).then_some(tag)
-}
-
-/// Télécharge le GitPush.exe de la release `tag`, puis le lance pour remplacer celui-ci
-/// une fois ce processus fermé (l'exe en cours d'exécution est verrouillé).
-pub fn start_update(tag: &str) -> Result<(), String> {
-    let dir = Path::new(&std::env::var("TEMP").unwrap_or_else(|_| ".".into())).join("GitPush-update");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let r = run(
-        "gh",
-        "",
-        Duration::from_secs(300),
-        &["release", "download", tag, "--repo", REPO, "--pattern", "GitPush.exe", "--dir", &dir.to_string_lossy(), "--clobber"],
-    );
-    if !r.ok {
-        return Err(format!("Téléchargement impossible : {}", r.last()));
-    }
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let folder = me.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    Command::new(dir.join("GitPush.exe"))
-        .args(["--update-to", &folder, "--wait-pid", &std::process::id().to_string()])
-        .spawn()
-        .map_err(|e| format!("Lancement de la mise à jour impossible : {e}"))?;
-    Ok(())
 }
 
 /// Vrai si l'outil (`git`, `gh`) se lance.

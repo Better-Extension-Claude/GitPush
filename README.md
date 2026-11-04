@@ -14,7 +14,7 @@ Un bouton **↑ GitPush** collé sur la fenêtre de Claude desktop (Windows). Un
 ## Le bouton
 
 - Clic gauche : ouvre la fenêtre GitPush.
-- Clic droit maintenu : déplace le bouton ; sa position est retenue.
+- Clic droit maintenu : déplace le bouton ; sa position est retenue. Clic droit sans bouger : retour à sa place par défaut.
 - Il se cache pendant que tu déplaces Claude à la souris et revient au lâcher.
 - « Replacer le bouton » est en haut de la fenêtre GitPush. Celle-ci se déplace par son en-tête et se ferme par sa croix (ou Échap) ; recliquer sur le bouton la ramène devant, même réduite.
 - Il se ferme tout seul avec Claude.
@@ -33,29 +33,24 @@ Nécessite aussi `git` : la fenêtre propose **Installer Git** s'il manque.
 
 ## Installation
 
-1. Télécharger `GitPush.exe` dans la dernière [release](../../releases/latest).
-2. Le lancer : c'est l'installateur.
-   - **Dossier** : où copier GitPush (par défaut `%LOCALAPPDATA%\Programs\GitPush`).
-   - **Démarrer avec Claude** : ajoute le hook dans `~/.claude/settings.json`, avec le bon chemin ; le reste du fichier est conservé, et une copie de l'ancien est gardée à côté (`settings.json.gitpush.bak`).
-   - **Prérequis** : Git et GitHub CLI, avec un bouton **Installer** (winget) pour ceux qui manquent.
-3. **Installer** : le bouton apparaît sur Claude.
+GitPush est une extension de **BetterClaude**, le gestionnaire d'extensions de Claude : il s'installe, se met à jour et se désinstalle uniquement par BetterClaude (onglet **Découverte**). BetterClaude le lance au début de chaque session ; l'activer ou le désactiver se fait dans **Mes extensions**.
 
-Le fichier téléchargé peut ensuite être supprimé. Windows peut afficher un avertissement SmartScreen (l'exe n'est pas signé) : « Informations complémentaires » → « Exécuter quand même ».
+Lancé seul, `GitPush.exe` ne s'installe pas lui-même : si son `extension.json` est à côté et que BetterClaude est installé, il demande à BetterClaude de l'installer (`BetterClaude.exe --add`) ; sinon, il indique de passer par BetterClaude.
 
-Mettre à jour : quand une nouvelle version sort, la fenêtre GitPush affiche **Mettre à jour (vX)** en haut à droite ; le bouton reste là tant qu'on ne l'utilise pas. Un clic télécharge la nouvelle version, ferme la fenêtre, remplace l'exe (hook conservé) et relance le bouton. Depuis une version antérieure à 1.0.2 : lancer le nouveau `GitPush.exe` et cliquer sur **Mettre à jour**. Désinstaller : lancer `GitPush.exe --install` puis **Désinstaller** (retire aussi le hook).
+Couleurs : celles du thème réglé dans BetterClaude (Réglages → Apparence), qui suit Claude par défaut.
 
-Installation sans fenêtre : `GitPush.exe --install-to "<dossier>"`.
+Réglages et journaux : `%LOCALAPPDATA%\BetterExt\data\gitpush\` (ceux d'avant la 1.1, dans `%APPDATA%\GitPush`, sont repris d'office).
 
 ## Compiler
 
-Rust, chaîne `stable-x86_64-pc-windows-gnu` :
+Rust, chaîne `stable-x86_64-pc-windows-gnu`. GitPush utilise `claude-band` (code partagé des extensions) et le SDK `BetterClaude/sdk`, attendus à côté du dossier `GitPush` :
 
 ```bash
 bash app/build.sh
 ```
 
-L'exe compilé est dans `dist/GitPush.exe`.
+L'exe compilé est dans `dist/GitPush.exe`, avec son manifeste `dist/extension.json` ; le script l'installe ensuite dans BetterClaude (`BetterClaude.exe --add`), qui le relance s'il est activé.
 
 ## Dépannage
 
-Lancer GitPush avec la variable d'environnement `GITPUSH_DEBUG=1` écrit un journal dans `%LOCALAPPDATA%\GitPush\debug.log`.
+Lancer GitPush avec la variable d'environnement `GITPUSH_DEBUG=1` écrit un journal `debug.log` dans le dossier de données. Un bouton resté coincé sous Claude se relance seul (une fois par minute au plus) et le note dans `incidents.log`.
