@@ -33,23 +33,23 @@ Nécessite aussi `git` : la fenêtre propose **Installer Git** s'il manque.
 
 ## Installation
 
-GitPush est une extension de **BetterClaude**, le gestionnaire d'extensions de Claude : il s'installe, se met à jour et se désinstalle uniquement par BetterClaude (onglet **Découverte**). BetterClaude le lance au début de chaque session ; l'activer ou le désactiver se fait dans **Mes extensions**.
+GitPush est une extension d'**ExtraClaude**, le gestionnaire d'extensions de Claude : il s'installe, se met à jour et se désinstalle uniquement par ExtraClaude (onglet **Découverte**). ExtraClaude le lance au début de chaque session ; l'activer ou le désactiver se fait dans **Mes extensions**.
 
-Lancé seul, `GitPush.exe` ne s'installe pas lui-même : si son `extension.json` est à côté et que BetterClaude est installé, il demande à BetterClaude de l'installer (`BetterClaude.exe --add`) ; sinon, il indique de passer par BetterClaude.
+Lancé seul, `GitPush.exe` ne s'installe pas lui-même : si son `extension.json` est à côté et qu'ExtraClaude est installé, il demande à ExtraClaude de l'installer (`ExtraClaude.exe --add`) ; sinon, il indique de passer par ExtraClaude.
 
-Couleurs : celles du thème réglé dans BetterClaude (Réglages → Apparence), qui suit Claude par défaut.
+Couleurs : celles du thème réglé dans ExtraClaude (Réglages → Apparence), qui suit Claude par défaut.
 
 Réglages et journaux : `%LOCALAPPDATA%\BetterExt\data\gitpush\` (ceux d'avant la 1.1, dans `%APPDATA%\GitPush`, sont repris d'office).
 
 ## Compiler
 
-Rust, chaîne `stable-x86_64-pc-windows-gnu`. GitPush utilise `claude-band` (code partagé des extensions) et le SDK `BetterClaude/sdk`, attendus à côté du dossier `GitPush` :
+Rust, chaîne `stable-x86_64-pc-windows-gnu`. GitPush utilise `claude-band` (code partagé des extensions) et le SDK `ExtraClaude/sdk`, attendus à côté du dossier `GitPush` :
 
 ```bash
 bash app/build.sh
 ```
 
-L'exe compilé est dans `dist/GitPush.exe`, avec son manifeste `dist/extension.json` ; le script l'installe ensuite dans BetterClaude (`BetterClaude.exe --add`), qui le relance s'il est activé.
+L'exe compilé est dans `dist/GitPush.exe`, avec son manifeste `dist/extension.json` ; le script l'installe ensuite dans ExtraClaude (`ExtraClaude.exe --add`), qui le relance s'il est activé.
 
 ## Dépannage
 

@@ -9,7 +9,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 
-/// Couleurs de la fenêtre : le thème réglé dans BetterClaude (Réglages → Apparence), qui suit
+/// Couleurs de la fenêtre : le thème réglé dans ExtraClaude (Réglages → Apparence), qui suit
 /// Claude par défaut. Les rôles intermédiaires (survol fort, appui) en sont dérivés.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Palette {
@@ -52,7 +52,7 @@ impl Palette {
 /// Thème en cours : (sombre ?, palette).
 static THEME: std::sync::RwLock<Option<(bool, Palette)>> = std::sync::RwLock::new(None);
 
-/// Thème à suivre : GITPUSH_THEME=light|dark (captures de test), sinon celui de BetterClaude.
+/// Thème à suivre : GITPUSH_THEME=light|dark (captures de test), sinon celui d'ExtraClaude.
 fn read_theme() -> (bool, Palette) {
     use claudeext::theme;
     match std::env::var("GITPUSH_THEME").as_deref() {
@@ -75,7 +75,7 @@ pub fn pal() -> Palette {
     theme().1
 }
 
-/// Suit le thème de BetterClaude : relu toutes les secondes, couleurs changées à la volée.
+/// Suit le thème d'ExtraClaude : relu toutes les secondes, couleurs changées à la volée.
 pub fn follow_theme(ctx: &egui::Context) {
     let id = egui::Id::new("theme-checked");
     let now = ctx.input(|i| i.time);

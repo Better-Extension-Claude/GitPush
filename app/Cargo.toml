@@ -13,8 +13,8 @@ rfd = { version = "0.15", default-features = false }
 raw-window-handle = "0.6"
 # Code partagé des fenêtres posées sur Claude (ordre des fenêtres, suivi de Claude).
 claude-band = { path = "../../claude-band" }
-# SDK de BetterClaude : thème réglable, dossier de données de l'extension.
-claudeext = { package = "betterext", path = "../../BetterClaude/sdk" }
+# SDK d'ExtraClaude : thème réglable, dossier de données de l'extension.
+claudeext = { package = "betterext", path = "../../ExtraClaude/sdk" }
 
 [dependencies.windows-sys]
 version = "0.59"

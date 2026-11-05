@@ -301,7 +301,7 @@ fn save_offset(offset: Option<(i32, i32)>) {
 }
 
 /// Dessine la pastille « ↑ GitPush » (anticrénelée, coins transparents) dans la fenêtre, à la
-/// couleur d'accent du thème de BetterClaude (un peu plus claire au survol).
+/// couleur d'accent du thème d'ExtraClaude (un peu plus claire au survol).
 fn render(hwnd: HWND, scale: f32, hover: bool) {
     let w = (BUTTON_W * scale).round() as i32;
     let h = (BUTTON_H * scale).round() as i32;
@@ -475,7 +475,7 @@ impl Overlay {
             return;
         }
         self.last_seen = Some(Instant::now());
-        // Thème changé dans BetterClaude : la pastille prend le nouvel accent.
+        // Thème changé dans ExtraClaude : la pastille prend le nouvel accent.
         let accent = claudeext::theme::current().accent;
         if accent != self.accent {
             self.accent = accent;
