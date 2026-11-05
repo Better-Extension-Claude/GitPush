@@ -32,9 +32,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, FindWindowW,
     GetClassNameW, GetCursorPos, GetMessageW, GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    IsWindowVisible, LoadCursorW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
     TranslateMessage, UpdateLayeredWindow, ASFW_ANY, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_RESTORE, ULW_ALPHA, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY,
+    SWP_NOZORDER, SW_RESTORE, ULW_ALPHA, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -46,8 +46,6 @@ pub const DEFAULT_OFFSET: (i32, i32) = (300, 44);
 const BUTTON_W: f32 = 118.0;
 const BUTTON_H: f32 = 30.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
-/// Envoyé par la fenêtre GitPush : « Replacer le bouton ».
-const WM_RESET: u32 = WM_APP + 1;
 
 #[derive(Clone, Copy, Default, PartialEq)]
 pub struct Rect {
@@ -145,16 +143,32 @@ pub fn claude_rect() -> Option<(Rect, f32)> {
     (!c.is_null()).then(|| (bounds(c), scale_of(c)))
 }
 
-fn button_window() -> HWND {
-    let title = wide(BUTTON_TITLE);
-    unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
+/// Signal « on vient de cliquer sur le bouton » envoyé à la fenêtre GitPush déjà ouverte :
+/// elle relit alors la conversation affichée dans Claude.
+const REFRESH_EVENT: &str = "Local\\GitPush-actualiser";
+
+/// Côté fenêtre : crée le signal (à garder ouvert tant qu'elle vit).
+pub fn refresh_signal() -> isize {
+    use windows_sys::Win32::System::Threading::CreateEventW;
+    let name = wide(REFRESH_EVENT);
+    unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) as isize }
 }
 
-/// « Replacer le bouton » depuis la fenêtre GitPush.
-pub fn reset_button() {
-    let b = button_window();
-    if !b.is_null() {
-        unsafe { PostMessageW(b, WM_RESET, 0, 0) };
+/// Côté fenêtre : vrai si un clic sur le bouton a eu lieu depuis le dernier appel.
+pub fn refresh_requested(signal: isize) -> bool {
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    signal != 0 && unsafe { WaitForSingleObject(signal as _, 0) } == 0
+}
+
+fn request_refresh() {
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    let name = wide(REFRESH_EVENT);
+    unsafe {
+        let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if !h.is_null() {
+            SetEvent(h);
+            windows_sys::Win32::Foundation::CloseHandle(h);
+        }
     }
 }
 
@@ -174,6 +188,7 @@ pub fn focus_modal() {
             windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(m, &mut r);
             let scale = (GetDpiForWindow(m) as f32 / 96.0).max(1.0);
             center_on_claude(m as isize, [(r.right - r.left) as f32 / scale, (r.bottom - r.top) as f32 / scale]);
+            request_refresh();
             SetForegroundWindow(m);
         }
     }
@@ -635,7 +650,6 @@ impl Overlay {
                     save_offset(Some(self.offset));
                 }
             }
-            WM_RESET => self.reset(),
             // Fermeture demandée par une autre application : ignorée (le bouton vit avec Claude).
             WM_CLOSE => {}
             // Fenêtre détruite quand même : on quitte, sinon le processus garderait le verrou
@@ -756,4 +770,47 @@ fn relaunched_recently() -> bool {
     let at = args.iter().position(|a| a == "--relaunched-at").and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u64>().ok());
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     at.is_some_and(|t| now.saturating_sub(t) < 60)
+}
+
+/// Titre de la conversation affichée dans Claude, lu dans sa fenêtre par UI Automation
+/// (la page s'appelle « <titre> - Claude Code »). Immédiat, contrairement aux fiches de
+/// session que Claude n'enregistre qu'environ 1 s après un changement de conversation.
+pub fn displayed_title() -> Option<String> {
+    use windows::core::VARIANT;
+    use windows::Win32::Foundation::HWND as WHWND;
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_DocumentControlTypeId};
+    let t = std::time::Instant::now();
+    let claude = find_claude();
+    if claude.is_null() {
+        crate::debug("titre affiché : fenêtre de Claude introuvable");
+        return None;
+    }
+    let read = || -> Result<String, String> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).map_err(|e| format!("UIA {e}"))?;
+            let root = uia.ElementFromHandle(WHWND(claude as _)).map_err(|e| format!("fenêtre {e}"))?;
+            let cond = uia
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_DocumentControlTypeId.0))
+                .map_err(|e| format!("condition {e}"))?;
+            // Plusieurs pages (une vide sert à Claude) : celle qui a un nom « <titre> - Claude… ».
+            let pages = root.FindAll(TreeScope_Descendants, &cond).map_err(|e| format!("pages {e}"))?;
+            let mut names = Vec::new();
+            for i in 0..pages.Length().unwrap_or(0) {
+                let Ok(p) = pages.GetElement(i) else { continue };
+                let name = p.CurrentName().map(|s| s.to_string()).unwrap_or_default();
+                if name.contains(" - ") {
+                    return Ok(name);
+                }
+                names.push(name);
+            }
+            Err(format!("aucune page nommée parmi {names:?}"))
+        }
+    };
+    let name = read();
+    crate::debug(format!("titre affiché : {name:?} en {:?}", t.elapsed()));
+    let name = name.ok()?;
+    let title = name.rsplit_once(" - ").map(|(t, _)| t).unwrap_or(&name).trim().to_string();
+    (!title.is_empty()).then_some(title)
 }

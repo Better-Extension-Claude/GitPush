@@ -1,6 +1,6 @@
 [package]
 name = "gitpush"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 description = "Bouton flottant sur Claude pour pousser le projet d'une conversation sur GitHub"
 
@@ -42,3 +42,8 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# UI Automation : titre de la conversation affichée dans Claude (même version que claude-band).
+[dependencies.windows]
+version = "0.58"
+features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Accessibility"]

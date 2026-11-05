@@ -31,6 +31,8 @@ pub struct Config {
     pub install_path: Option<String>,
     /// Dossier choisi à la main pour une conversation (clé : son dossier de travail d'origine).
     pub folders: HashMap<String, String>,
+    /// Dossiers retirés à la main de la liste d'une conversation (même clé).
+    pub hidden: HashMap<String, Vec<String>>,
 }
 
 /// Réglages : `config.json` du dossier de données de l'extension. Ceux d'avant la 1.1
@@ -82,29 +84,41 @@ impl Conversation {
         format!("{}  —  {}", self.title, folder_name(&self.cwd))
     }
 
-    fn new(title: String, cwd: String, extra: Vec<String>, chosen: &HashMap<String, String>) -> Conversation {
+    fn new(title: String, cwd: String, id: Option<String>, extra: Vec<String>, chosen: &Config) -> Conversation {
+        // Choix propres à chaque conversation (plusieurs peuvent partager un dossier parent).
+        // Repli sur l’ancienne clé (le dossier) seulement quand ce dossier est lui-même un dépôt.
+        let key = id.unwrap_or_else(|| cwd.clone());
+        let legacy = (key != cwd && Path::new(&cwd).join(".git").exists()).then(|| cwd.clone());
         let is_scratch = |p: &str| p.contains("scratch-workspaces") || p.contains("side-session-notes");
+        let hidden = chosen.hidden.get(&key).or_else(|| legacy.as_ref().and_then(|l| chosen.hidden.get(l))).cloned().unwrap_or_default();
+        let is_hidden = |p: &str| hidden.iter().any(|h| h.eq_ignore_ascii_case(p));
         let mut folders: Vec<String> = Vec::new();
         for f in std::iter::once(cwd.clone()).chain(extra) {
-            if !is_scratch(&f) && Path::new(&f).is_dir() && !folders.iter().any(|x| x.eq_ignore_ascii_case(&f)) {
+            if !is_scratch(&f) && !is_hidden(&f) && Path::new(&f).is_dir() && !folders.iter().any(|x| x.eq_ignore_ascii_case(&f)) {
                 folders.push(f);
             }
         }
+        // Session ouverte sur un dossier qui n'est pas un dépôt (un dossier parent, par exemple) :
+        // les dépôts où elle a travaillé passent devant, le plus récemment poussé en premier.
+        if !Path::new(&cwd).join(".git").exists() {
+            folders.sort_by_cached_key(|f| std::cmp::Reverse(last_push(f)));
+        }
         let mut current = folders.first().cloned().unwrap_or_else(|| cwd.clone());
-        if let Some(c) = chosen.get(&cwd).filter(|c| Path::new(c).is_dir()) {
+        let picked = chosen.folders.get(&key).or_else(|| legacy.as_ref().and_then(|l| chosen.folders.get(l)));
+        if let Some(c) = picked.filter(|c| Path::new(c).is_dir()) {
             if !folders.iter().any(|x| x.eq_ignore_ascii_case(c)) {
                 folders.push(c.clone());
             }
             current = c.clone();
         }
-        Conversation { title, key: cwd, folders, cwd: current }
+        Conversation { title, key, folders, cwd: current }
     }
 }
 
 /// Conversations, celle affichée dans Claude en premier : d'abord les sessions de l'app
 /// desktop (triées par `lastFocusedAt`), puis les .jsonl de Claude Code en complément.
 pub fn recent_conversations(count: usize) -> Vec<Conversation> {
-    let chosen = Config::load().folders;
+    let chosen = Config::load();
     let transcripts = transcript_index();
     let mut list = desktop_sessions(count, &transcripts, &chosen);
     for c in jsonl_conversations(count, &transcripts, &chosen) {
@@ -138,13 +152,20 @@ fn transcript_index() -> HashMap<String, (SystemTime, PathBuf)> {
 /// Autres dossiers de la conversation, d'après sa transcription : ceux ajoutés à la session
 /// (« additionalWorkingDirectories »), puis les projets où Claude a écrit des fichiers
 /// (dossier contenant le .git le plus proche, sinon le dossier du fichier), les plus fréquents d'abord.
-fn extra_dirs(transcript: &Path) -> Vec<String> {
-    let (head, tail) = (chunk(transcript, 0, 256 * 1024), chunk_tail(transcript, 512 * 1024));
+/// `whole` : session ouverte sur un dossier qui n'est pas un dépôt (un dossier parent) ; on lit
+/// alors toute la transcription et on ne garde que les dépôts, pour n'en oublier aucun.
+fn extra_dirs(transcript: &Path, whole: bool) -> Vec<String> {
+    let (head, tail) = if whole {
+        (String::new(), fs::read(transcript).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default())
+    } else {
+        (chunk(transcript, 0, 256 * 1024), chunk_tail(transcript, 512 * 1024))
+    };
     let added_rx = Regex::new(r#""additionalWorkingDirectories":(\[[^\]]*\])"#).unwrap();
     let find = |text: &str| added_rx.captures_iter(text).last().and_then(|c| serde_json::from_str::<Vec<String>>(&c[1]).ok());
     let mut dirs = find(&tail).or_else(|| find(&head)).unwrap_or_default();
 
     let file_rx = Regex::new(r#""file_path":"((?:[^"\\]|\\.)*)""#).unwrap();
+    let mut roots: HashMap<String, Option<String>> = HashMap::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
     for c in file_rx.captures_iter(&head).chain(file_rx.captures_iter(&tail)) {
         let Ok(file) = serde_json::from_str::<String>(&format!("\"{}\"", &c[1])) else { continue };
@@ -153,15 +174,22 @@ fn extra_dirs(transcript: &Path) -> Vec<String> {
             continue;
         }
         let Some(parent) = Path::new(&file).parent() else { continue };
-        let root = parent.ancestors().find(|a| a.join(".git").exists()).unwrap_or(parent);
-        let root = root.to_string_lossy().to_string();
+        let root = roots
+            .entry(parent.to_string_lossy().to_lowercase())
+            .or_insert_with(|| match parent.ancestors().find(|a| a.join(".git").exists()) {
+                Some(r) => Some(r.to_string_lossy().to_string()),
+                None if whole => None,
+                None => Some(parent.to_string_lossy().to_string()),
+            })
+            .clone();
+        let Some(root) = root else { continue };
         match counts.iter_mut().find(|(d, _)| d.eq_ignore_ascii_case(&root)) {
             Some((_, n)) => *n += 1,
             None => counts.push((root, 1)),
         }
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1));
-    dirs.extend(counts.into_iter().take(3).map(|(d, _)| d));
+    dirs.extend(counts.into_iter().take(if whole { 8 } else { 3 }).map(|(d, _)| d));
     dirs
 }
 
@@ -171,7 +199,7 @@ fn extra_dirs(transcript: &Path) -> Vec<String> {
 fn desktop_sessions(
     count: usize,
     transcripts: &HashMap<String, (SystemTime, PathBuf)>,
-    chosen: &HashMap<String, String>,
+    chosen: &Config,
 ) -> Vec<Conversation> {
     let mut roots = Vec::new();
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -191,7 +219,7 @@ fn desktop_sessions(
         field("isArchived"),
         field("cliSessionId"),
     );
-    let mut found: Vec<(u64, String, String, Option<PathBuf>)> = Vec::new();
+    let mut found: Vec<(u64, String, String, Option<String>, Option<PathBuf>)> = Vec::new();
     for root in roots {
         for account in fs::read_dir(&root).into_iter().flatten().flatten() {
             for org in fs::read_dir(account.path()).into_iter().flatten().flatten() {
@@ -213,8 +241,9 @@ fn desktop_sessions(
                     }
                     let focus = get(&focus_rx).or_else(|| get(&activity_rx)).and_then(|n| n.parse().ok()).unwrap_or(0);
                     let title = text(&title_rx).filter(|t| !t.is_empty()).unwrap_or_else(|| folder_name(&cwd));
-                    let transcript = text(&cli_rx).and_then(|id| transcripts.get(&id)).map(|(_, p)| p.clone());
-                    found.push((focus, title, cwd, transcript));
+                    let id = text(&cli_rx).filter(|i| !i.is_empty());
+                    let transcript = id.as_ref().and_then(|id| transcripts.get(id)).map(|(_, p)| p.clone());
+                    found.push((focus, title, cwd, id, transcript));
                 }
             }
         }
@@ -223,11 +252,33 @@ fn desktop_sessions(
     found
         .into_iter()
         .take(count)
-        .map(|(_, title, cwd, transcript)| {
-            let extra = transcript.map(|t| extra_dirs(&t)).unwrap_or_default();
-            Conversation::new(title, cwd, extra, chosen)
+        .map(|(_, title, cwd, id, transcript)| {
+            let whole = !Path::new(&cwd).join(".git").exists();
+            let extra = transcript.map(|t| extra_dirs(&t, whole)).unwrap_or_default();
+            Conversation::new(title, cwd, id, extra, chosen)
         })
         .collect()
+}
+
+/// Date du dernier échange avec GitHub (push ou fetch) d'un dépôt ; `None` hors dépôt.
+fn last_push(dir: &str) -> Option<SystemTime> {
+    let git = Path::new(dir).join(".git");
+    if !git.exists() {
+        return None;
+    }
+    let mut stack = vec![git.join("logs").join("refs").join("remotes")];
+    let mut latest = fs::metadata(git.join("logs").join("HEAD")).and_then(|m| m.modified()).ok();
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                stack.push(e.path());
+            } else if let Ok(t) = m.modified() {
+                latest = latest.max(Some(t));
+            }
+        }
+    }
+    latest.or(Some(SystemTime::UNIX_EPOCH))
 }
 
 fn folder_name(cwd: &str) -> String {
@@ -239,7 +290,7 @@ fn folder_name(cwd: &str) -> String {
 fn jsonl_conversations(
     count: usize,
     transcripts: &HashMap<String, (SystemTime, PathBuf)>,
-    chosen: &HashMap<String, String>,
+    chosen: &Config,
 ) -> Vec<Conversation> {
     let mut files: Vec<(SystemTime, PathBuf)> = transcripts.values().cloned().collect();
     files.sort_by(|a, b| b.0.cmp(&a.0));
@@ -257,7 +308,9 @@ fn jsonl_conversations(
         let title = last_match(&title_rx, &tail)
             .or_else(|| last_match(&title_rx, &head))
             .unwrap_or_else(|| Path::new(&cwd).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default());
-        list.push(Conversation::new(title, cwd, extra_dirs(&path), chosen));
+        let id = path.file_stem().map(|s| s.to_string_lossy().to_string());
+        let whole = !Path::new(&cwd).join(".git").exists();
+        list.push(Conversation::new(title, cwd.clone(), id, extra_dirs(&path, whole), chosen));
         if list.len() >= count {
             break;
         }
@@ -787,9 +840,23 @@ pub fn winget_install(id: &str) {
         .spawn();
 }
 
+/// Dépôts du compte, puis ceux des organisations dont il fait partie.
 pub fn my_repos() -> Option<Vec<String>> {
-    let r = run("gh", "", Duration::from_secs(60), &["repo", "list", "--limit", "100", "--json", "url", "-q", ".[].url"]);
-    r.ok.then(|| lines(&r.out))
+    let list = |owner: &str| {
+        let mut args = vec!["repo", "list"];
+        if !owner.is_empty() {
+            args.push(owner);
+        }
+        args.extend_from_slice(&["--limit", "100", "--json", "url", "-q", ".[].url"]);
+        let r = run("gh", "", Duration::from_secs(60), &args);
+        r.ok.then(|| lines(&r.out))
+    };
+    let mut repos = list("")?;
+    let orgs = run("gh", "", Duration::from_secs(30), &["api", "user/orgs", "-q", ".[].login"]);
+    for org in lines(&orgs.out) {
+        repos.extend(list(&org).unwrap_or_default());
+    }
+    Some(repos)
 }
 
 /// « propriétaire/dépôt » d'une adresse GitHub (https ou ssh).

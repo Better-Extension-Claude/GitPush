@@ -93,6 +93,8 @@ pub fn follow_theme(ctx: &egui::Context) {
 // Listes déroulantes « Mes dépôts » / « Existantes » et boutons « Nouveau ».
 const LIST_W: f32 = 200.0;
 const LIST_H: f32 = 360.0;
+/// Hauteur d’une ligne de liste déroulante, espacement compris.
+const ROW_H: f32 = 38.0;
 const NEW_W: f32 = 92.0;
 
 fn bold(size: f32) -> FontId {
@@ -161,17 +163,33 @@ fn close_button(ui: &mut Ui) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Petit lien de l'en-tête : fond et texte plus clairs au survol.
-/// Liste déroulante aux lignes hautes (« Mes dépôts », « Existantes »).
-fn tall_list<R>(id: &str, text: &str, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<Option<R>> {
+/// Croix seule (sans fond ni contour) pour retirer une ligne : discrète, plus claire au survol.
+fn remove_cross(ui: &mut Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
+    let (c, d) = (rect.center(), 4.5);
+    let stroke = Stroke::new(1.5_f32, if resp.hovered() { pal().text } else { pal().subtle });
+    ui.painter().line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
+    ui.painter().line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Liste déroulante aux lignes hautes, à la taille de son contenu (« Dossier », « Mes dépôts », « Existantes »).
+/// egui garde la taille du premier affichage d'une liste : quand son nombre de lignes change (« Chargement… »
+/// puis les dépôts), on la recrée sous un autre identifiant, rouverte si elle l'était.
+fn tall_list<R>(id: &str, text: &str, width: f32, rows: usize, reopen: bool, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    let popup_of = |ui: &Ui, n: usize| ui.make_persistent_id(egui::Id::new(format!("{id}#{n}"))).with("popup");
+    let last_key = egui::Id::new(id).with("rows");
+    let last = ui.data(|d| d.get_temp::<usize>(last_key));
+    ui.data_mut(|d| d.insert_temp(last_key, rows));
+    let was_open = last.filter(|n| *n != rows).is_some_and(|n| ui.memory(|m| m.is_popup_open(popup_of(ui, n))));
     // GITPUSH_OPEN_LIST=<id> garde la liste ouverte : sert à la capturer sans toucher à la souris.
-    if std::env::var("GITPUSH_OPEN_LIST").is_ok_and(|v| v == id) {
-        let popup = ui.make_persistent_id(egui::Id::new(id)).with("popup");
+    if reopen || was_open || std::env::var("GITPUSH_OPEN_LIST").is_ok_and(|v| v == id) {
+        let popup = popup_of(ui, rows);
         ui.memory_mut(|m| m.open_popup(popup));
     }
-    egui::ComboBox::from_id_salt(id).width(LIST_W).height(LIST_H).selected_text(text).show_ui(ui, |ui| {
-        // Toujours haute, même avec peu de lignes ; elle peut recouvrir la liste des fichiers.
-        ui.set_min_height(LIST_H - 20.0);
+    egui::ComboBox::from_id_salt(format!("{id}#{rows}")).width(width).height(LIST_H).selected_text(text).show_ui(ui, |ui| {
+        // À la taille de son contenu, jusqu'à LIST_H (puis défilement).
+        ui.set_min_height((8.0 + rows.max(1) as f32 * ROW_H).min(LIST_H - 20.0));
         ui.spacing_mut().button_padding = vec2(12.0, 10.0);
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.add_space(4.0);
@@ -179,18 +197,6 @@ fn tall_list<R>(id: &str, text: &str, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> 
         ui.add_space(4.0);
         r
     })
-}
-
-fn header_link(ui: &mut Ui, text: &str) -> egui::Response {
-    let font = FontId::proportional(12.5);
-    let width = ui.painter().layout_no_wrap(text.to_string(), font.clone(), pal().subtle).size().x;
-    let (rect, resp) = ui.allocate_exact_size(vec2(width + 14.0, 26.0), Sense::click());
-    let hovered = resp.hovered();
-    if hovered {
-        ui.painter().rect_filled(rect, Rounding::same(6.0), pal().hover);
-    }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, if hovered { pal().text } else { pal().subtle });
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Image egui en BMP 32 bits (de haut en bas).
@@ -222,6 +228,7 @@ struct ModalApp {
 impl eframe::App for ModalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         follow_theme(ctx);
+        self.modal.poll_refresh();
         if self.modal.show(ctx, &mut self.cfg) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -326,6 +333,8 @@ enum Kind {
 }
 
 enum Msg {
+    /// Conversations relues après un clic sur le bouton, titre affiché dans Claude, seconde lecture.
+    Conversations(Vec<Conversation>, Option<String>, bool),
     Loaded { cwd: String, project: Project, ignored: HashSet<String>, selection: Vec<String> },
     Repos(Option<Vec<String>>),
     Branches(String, Vec<String>),
@@ -369,6 +378,14 @@ struct Modal {
     is_git_missing: bool,
     /// Sélection prise dans le dépôt GitHub : (fichiers présents ici, fichiers en ligne).
     from_remote: Option<(usize, usize)>,
+    /// Rouvre la liste des dossiers après un retrait (egui la ferme à chaque clic).
+    reopen_folders: bool,
+    /// Signal envoyé par un clic sur le bouton alors que la fenêtre est déjà ouverte.
+    signal: isize,
+    /// Seconde lecture de la conversation affichée : Claude l’enregistre environ 1 s après le changement.
+    recheck_at: Option<Instant>,
+    /// Conversation choisie à la main dans la liste : la seconde lecture ne la remplace pas.
+    picked_by_hand: bool,
 }
 
 enum Action {
@@ -414,8 +431,13 @@ impl Modal {
             is_logging_in: false,
             is_git_missing: false,
             from_remote: None,
+            reopen_folders: false,
+            signal: win::refresh_signal(),
+            recheck_at: Some(Instant::now() + Duration::from_millis(1500)),
+            picked_by_hand: false,
         };
-        m.select(0);
+        let shown = displayed_index(&m.convs, win::displayed_title().as_deref()).unwrap_or(0);
+        m.select(shown);
         m.check_account();
         m.spawn(|| if data::tool_available("git") { Msg::Nothing } else { Msg::NoGit });
         m
@@ -511,6 +533,57 @@ impl Modal {
         self.kind = kind;
     }
 
+    /// Conversation affichée dans Claude, relue au clic sur le bouton (et une seconde fois 1,5 s
+    /// après, le temps que Claude l'enregistre). Rien n'est relu le reste du temps.
+    fn poll_refresh(&mut self) {
+        let now = Instant::now();
+        if win::refresh_requested(self.signal) {
+            self.picked_by_hand = false;
+            self.refresh_conversation(false);
+            self.recheck_at = Some(now + Duration::from_millis(1500));
+        } else if self.recheck_at.is_some_and(|t| now >= t) {
+            self.recheck_at = None;
+            if !self.picked_by_hand {
+                self.refresh_conversation(true);
+            }
+        }
+        if let Some(t) = self.recheck_at {
+            self.ctx.request_repaint_after(t.saturating_duration_since(now));
+        }
+    }
+
+    /// Au clic : la conversation affichée est lue tout de suite dans la fenêtre de Claude (son titre)
+    /// et choisie dans la liste déjà chargée ; la liste est ensuite relue en arrière-plan.
+    fn refresh_conversation(&mut self, second: bool) {
+        let title = win::displayed_title();
+        if !second {
+            if let Some(i) = displayed_index(&self.convs, title.as_deref()).filter(|i| *i != self.conv) {
+                if !self.is_busy {
+                    self.select(i);
+                }
+            }
+        }
+        self.spawn(move || Msg::Conversations(data::recent_conversations(25), title, second));
+    }
+
+    fn apply_conversations(&mut self, convs: Vec<Conversation>, title: Option<String>) {
+        if convs.is_empty() || self.is_busy {
+            return;
+        }
+        let index = displayed_index(&convs, title.as_deref()).unwrap_or(0);
+        let current = self.convs.get(self.conv).map(|c| c.key.clone());
+        crate::debug(format!("actualisation : affichée {} (titre lu : {title:?})", convs[index].label()));
+        if current.as_deref() == Some(convs[index].key.as_str()) {
+            // Même conversation : on garde ce qui est à l'écran (dossier, cases cochées).
+            let cwd = self.cwd.clone();
+            self.convs = convs;
+            self.conv = index;
+            self.convs[index].cwd = cwd;
+        } else {
+            self.convs = convs;
+            self.select(index);
+        }
+    }
     fn select(&mut self, index: usize) {
         let Some(c) = self.convs.get(index) else {
             self.set_status("Aucune conversation Claude trouvée.", Kind::Err);
@@ -529,8 +602,31 @@ impl Modal {
         }
         c.cwd = folder.clone();
         cfg.folders.insert(c.key.clone(), folder.clone());
+        if let Some(h) = cfg.hidden.get_mut(&c.key) {
+            h.retain(|x| !x.eq_ignore_ascii_case(&folder));
+        }
         cfg.save();
         self.open_folder(folder);
+    }
+
+    /// Retire un dossier de la liste de la conversation, pour de bon (retenu dans la config).
+    fn remove_folder(&mut self, folder: String, cfg: &mut Config) {
+        let Some(c) = self.convs.get_mut(self.conv) else { return };
+        c.folders.retain(|f| !f.eq_ignore_ascii_case(&folder));
+        let hidden = cfg.hidden.entry(c.key.clone()).or_default();
+        if !hidden.iter().any(|h| h.eq_ignore_ascii_case(&folder)) {
+            hidden.push(folder.clone());
+        }
+        let was_current = c.cwd.eq_ignore_ascii_case(&folder);
+        if cfg.folders.get(&c.key).is_some_and(|f| f.eq_ignore_ascii_case(&folder)) {
+            cfg.folders.remove(&c.key);
+        }
+        let next = c.folders.first().cloned();
+        cfg.save();
+        if let (true, Some(next)) = (was_current, next) {
+            self.convs[self.conv].cwd = next.clone();
+            self.open_folder(next);
+        }
     }
 
     fn open_folder(&mut self, cwd: String) {
@@ -695,6 +791,11 @@ impl Modal {
                 }
                 Msg::AccountChanged(Err(e)) => self.set_status(e, Kind::Err),
                 Msg::AccountChanged(Ok(())) => self.check_account(),
+                Msg::Conversations(convs, title, second) => {
+                    if !(second && self.picked_by_hand) {
+                        self.apply_conversations(convs, title);
+                    }
+                }
                 Msg::NoGit => {
                     self.is_git_missing = true;
                     self.set_status("Git n'est pas installé : GitPush en a besoin pour pousser.", Kind::Err);
@@ -742,10 +843,6 @@ impl Modal {
                 if close_button(ui).on_hover_text("Fermer (Échap)").clicked() {
                     close = true;
                 }
-                if header_link(ui, "Replacer le bouton").clicked() {
-                    cfg.offset = None;
-                    win::reset_button();
-                }
                 ui.add_space(12.0);
                 self.account_badge(ui);
             });
@@ -765,6 +862,7 @@ impl Modal {
                 }
             });
             if let Some(i) = pick.filter(|i| *i != self.conv) {
+                self.picked_by_hand = true;
                 self.select(i);
             }
             ui.end_row();
@@ -773,14 +871,38 @@ impl Modal {
             ui.label(RichText::new("Dossier").color(pal().subtle));
             ui.horizontal(|ui| {
                 let folders = self.convs.get(self.conv).map(|c| c.folders.clone()).unwrap_or_default();
-                let mut chosen = None;
-                egui::ComboBox::from_id_salt("folder").width(field_w - 140.0).selected_text(self.cwd.clone()).show_ui(ui, |ui| {
+                let (mut chosen, mut removed) = (None, None);
+                let list_w = field_w - 140.0;
+                tall_list("folder", &self.cwd.clone(), list_w, folders.len(), std::mem::take(&mut self.reopen_folders), ui, |ui| {
+                    let can_remove = folders.len() > 1;
                     for f in &folders {
-                        if ui.selectable_label(f.eq_ignore_ascii_case(&self.cwd), f).clicked() {
-                            chosen = Some(f.clone());
-                        }
+                        ui.horizontal(|ui| {
+                            // Ligne pleine largeur, texte à gauche ; la croix à droite retire le dossier.
+                            let w = list_w - 16.0 - if can_remove { 44.0 } else { 0.0 };
+                            let (rect, row) = ui.allocate_exact_size(vec2(w, 36.0), Sense::click());
+                            let is_current = f.eq_ignore_ascii_case(&self.cwd);
+                            // Ligne choisie : fond de sélection du thème ; survol : fond de survol ; texte du thème.
+                            let fill = if is_current { Some(ui.visuals().selection.bg_fill) } else { row.hovered().then(|| pal().hover) };
+                            if let Some(fill) = fill {
+                                ui.painter().rect_filled(rect, Rounding::same(6.0), fill);
+                            }
+                            let color = pal().text;
+                            ui.painter().text(rect.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, f, FontId::proportional(14.0), color);
+                            let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if row.clicked() {
+                                chosen = Some(f.clone());
+                            }
+                            if can_remove && remove_cross(ui).on_hover_text("Retirer ce dossier de la liste").clicked() {
+                                removed = Some(f.clone());
+                            }
+                        });
                     }
                 });
+                if let Some(f) = removed {
+                    self.remove_folder(f, cfg);
+                    self.reopen_folders = true;
+                    self.ctx.request_repaint();
+                }
                 if ui.button("Autre dossier…").clicked() {
                     chosen = win::pick_folder("Dossier du projet à pousser", win::MODAL_TITLE);
                 }
@@ -801,7 +923,7 @@ impl Modal {
                     self.set_remote(&remote);
                 }
                 let mut chosen = None;
-                let combo = tall_list("repos", "Mes dépôts", ui, |ui| {
+                let combo = tall_list("repos", "Mes dépôts", LIST_W, self.repos.as_ref().map_or(1, |r| r.len()), false, ui, |ui| {
                     match &self.repos {
                         None => {
                             ui.label(RichText::new("Chargement…").color(pal().subtle));
@@ -818,7 +940,8 @@ impl Modal {
                         }
                     }
                 });
-                if combo.response.clicked() && self.repos.is_none() && !self.is_loading_repos {
+                // Chargée dès que la liste est ouverte (clic, ou ouverte pour une capture de test).
+                if (combo.response.clicked() || combo.inner.is_some()) && self.repos.is_none() && !self.is_loading_repos {
                     self.is_loading_repos = true;
                     self.spawn(|| Msg::Repos(data::my_repos()));
                 }
@@ -854,7 +977,7 @@ impl Modal {
                 let hint = if self.project.branch.is_empty() { "nom de la nouvelle branche" } else { "main" };
                 let edit = ui.add(egui::TextEdit::singleline(&mut self.project.branch).hint_text(hint).desired_width(field_w - 320.0));
                 let mut chosen = None;
-                tall_list("branches", "Existantes", ui, |ui| {
+                tall_list("branches", "Existantes", LIST_W, self.branches.len(), false, ui, |ui| {
                     if self.branches.is_empty() {
                         ui.label(RichText::new("Aucune branche distante").color(pal().subtle));
                     }
@@ -1046,4 +1169,10 @@ fn short_date(iso: &str) -> String {
     } else {
         iso.to_string()
     }
+}
+
+/// Conversation dont le titre est celui affiché dans Claude (la plus récente s'il y en a plusieurs).
+fn displayed_index(convs: &[Conversation], title: Option<&str>) -> Option<usize> {
+    let title = title?;
+    convs.iter().position(|c| c.title == title)
 }

@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "gitpush"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "betterext",
  "claude-band",
@@ -710,6 +710,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "windows",
  "windows-sys 0.59.0",
 ]
 
