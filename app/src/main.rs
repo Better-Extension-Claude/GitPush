@@ -54,7 +54,8 @@ fn main() {
         if !win::single_instance("Local\\GitPush-overlay") {
             return;
         }
-        win::run_button(data::Config::load().offset.unwrap_or(win::DEFAULT_OFFSET));
+        let cfg = data::Config::load();
+        win::run_button(cfg.pane_offset, cfg.offset);
         return;
     }
     // Une ancienne fenêtre GitPush (avant 1.1) lance la version téléchargée avec

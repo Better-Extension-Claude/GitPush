@@ -24,8 +24,12 @@ pub struct Project {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Position du bouton par rapport au coin haut-gauche de Claude, en pixels.
+    /// Ancienne position du bouton (avant 1.1.3), par rapport au coin haut-gauche de Claude :
+    /// convertie en `pane_offset` dès que la zone de la discussion est connue.
     pub offset: Option<(i32, i32)>,
+    /// Position du bouton, en pixels : par rapport au bord gauche de la zone de la discussion
+    /// (il suit la liste des discussions quand on l'ouvre ou la ferme) et au haut de Claude.
+    pub pane_offset: Option<(i32, i32)>,
     pub projects: HashMap<String, Project>,
     /// GitPush.exe installé par l'installateur intégré.
     pub install_path: Option<String>,

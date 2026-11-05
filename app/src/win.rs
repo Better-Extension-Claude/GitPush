@@ -5,7 +5,9 @@
 //! Claude a bougé ou repasse devant. La fenêtre GitPush elle-même est un autre processus (`--modal`).
 
 use crate::data::Config;
+use claude_band::composer::Anchor;
 use claude_band::window as band;
+use std::sync::{Arc, Mutex};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -32,7 +34,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, FindWindowW,
     GetClassNameW, GetCursorPos, GetMessageW, GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, LoadCursorW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    IsWindowVisible, LoadCursorW, RegisterClassW, SetForegroundWindow, KillTimer, SetTimer, SetWindowPos, ShowWindow,
     TranslateMessage, UpdateLayeredWindow, ASFW_ANY, GW_OWNER, IDC_HAND, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SWP_NOSIZE,
     SWP_NOZORDER, SW_RESTORE, ULW_ALPHA, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN,
@@ -41,7 +43,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 pub const BUTTON_TITLE: &str = "GitPush-bouton";
 pub const MODAL_TITLE: &str = "GitPush";
-pub const DEFAULT_OFFSET: (i32, i32) = (300, 44);
+/// Juste à droite de la liste des discussions, sous la barre de titre.
+pub const DEFAULT_OFFSET: (i32, i32) = (1, 44);
+/// Bord gauche de la discussion avant la première mesure (liste des discussions ouverte).
+const DEFAULT_PANE_DX: i32 = 299;
+/// La liste des discussions s'ouvre ou se ferme : bouton caché jusqu'à ce que tout soit immobile.
+const SETTLE: Duration = Duration::from_millis(400);
+const TIMER_TICK: usize = 1;
+const TIMER_SETTLE: usize = 2;
+/// claude-band a remesuré Claude et la zone de la discussion.
+const WM_ANCHOR: u32 = band::WM_APP + 1;
 
 const BUTTON_W: f32 = 118.0;
 const BUTTON_H: f32 = 30.0;
@@ -296,7 +307,8 @@ fn cursor() -> (i32, i32) {
 fn save_offset(offset: Option<(i32, i32)>) {
     // Relit la config : la fenêtre GitPush l'a peut-être modifiée entre-temps.
     let mut cfg = Config::load();
-    cfg.offset = offset;
+    cfg.pane_offset = offset;
+    cfg.offset = None;
     cfg.save();
 }
 
@@ -413,6 +425,14 @@ struct Overlay {
     started: Instant,
     last_seen: Option<Instant>,
     last_search: Instant,
+    /// Claude et la zone de la discussion, mesurés par claude-band.
+    anchor: Arc<Mutex<Anchor>>,
+    /// Bord gauche de la discussion par rapport à Claude, à la dernière mesure.
+    pane_dx: Option<i32>,
+    /// Position d'avant 1.1.3 (par rapport à Claude), à convertir à la première mesure.
+    legacy: Option<(i32, i32)>,
+    /// Caché jusque-là : la liste des discussions vient de s'ouvrir ou de se fermer.
+    settle_until: Option<Instant>,
 }
 
 /// Le bouton, pour la remise en ordre que claude-band appelle depuis son propre fil.
@@ -490,7 +510,7 @@ impl Overlay {
             return;
         }
         self.place();
-        if !self.is_shown && !self.is_moving {
+        if !self.is_shown && !self.is_moving && self.can_show() {
             crate::debug("bouton : affiché");
             band::show(self.hwnd, self.claude);
             self.is_shown = true;
@@ -530,6 +550,41 @@ impl Overlay {
         self.watch.attach(claude, self.hwnd);
     }
 
+    /// Pas pendant que la liste des discussions s'ouvre ou se ferme, ni avant de savoir où
+    /// est la discussion (2 s au plus).
+    fn can_show(&self) -> bool {
+        let settling = self.settle_until.is_some_and(|t| Instant::now() < t);
+        !settling && (self.pane_dx.is_some() || self.started.elapsed() > Duration::from_secs(2))
+    }
+
+    /// Nouvelle mesure de claude-band : le bord gauche de la discussion a-t-il bougé ?
+    fn on_anchor(&mut self) {
+        let a = *self.anchor.lock().unwrap();
+        if self.claude.is_null() || a.claude != self.claude as isize {
+            return;
+        }
+        let Some(pane) = a.pane else { return };
+        let dx = pane.x - a.window.x;
+        if let Some(old) = self.legacy.take() {
+            self.offset = (old.0 - dx, old.1);
+            save_offset(Some(self.offset));
+        }
+        if self.pane_dx.is_some_and(|d| d != dx) {
+            crate::debug(format!("bouton : la discussion commence à {dx} : caché le temps que tout s'arrête"));
+            self.settle_until = Some(Instant::now() + SETTLE);
+            unsafe { SetTimer(self.hwnd, TIMER_SETTLE, 100, None) };
+            if self.is_shown {
+                band::hide(self.hwnd);
+                self.is_shown = false;
+            }
+        }
+        let first = self.pane_dx.is_none();
+        self.pane_dx = Some(dx);
+        if first {
+            self.tick();
+        }
+    }
+
     fn place(&mut self) {
         if self.claude.is_null() || self.is_moving || unsafe { IsIconic(self.claude) } != 0 {
             return;
@@ -541,7 +596,8 @@ impl Overlay {
             render(self.hwnd, scale, self.is_hover);
         }
         let (w, h) = ((BUTTON_W * scale).round() as i32, (BUTTON_H * scale).round() as i32);
-        let x = rect.x + self.offset.0.clamp(0, (rect.w - w).max(0));
+        let left = self.pane_dx.unwrap_or(DEFAULT_PANE_DX);
+        let x = rect.x + (left + self.offset.0).clamp(0, (rect.w - w).max(0));
         let y = rect.y + self.offset.1.clamp(0, (rect.h - h).max(0));
         // Position seulement si elle change ; l'ordre des fenêtres, à part (`order`).
         if self.pos != Some((x, y)) {
@@ -571,7 +627,15 @@ impl Overlay {
             x >= 0.0 && y >= 0.0 && x < BUTTON_W * self.scale && y < BUTTON_H * self.scale
         };
         match msg {
+            WM_TIMER if wparam == TIMER_SETTLE => {
+                if self.settle_until.map_or(true, |t| Instant::now() >= t) {
+                    unsafe { KillTimer(self.hwnd, TIMER_SETTLE) };
+                    self.settle_until = None;
+                    self.tick();
+                }
+            }
             WM_TIMER => self.tick(),
+            WM_ANCHOR => self.on_anchor(),
             // Claude bouge (0), est saisi à la souris (1), lâché (2), ou passe devant (3).
             band::WM_CLAUDE_MOVED => match wparam {
                 1 => {
@@ -586,7 +650,7 @@ impl Overlay {
                     crate::debug("bouton : Claude lâché");
                     self.is_moving = false;
                     self.place();
-                    if unsafe { IsIconic(self.claude) } == 0 {
+                    if unsafe { IsIconic(self.claude) } == 0 && self.can_show() {
                         band::show(self.hwnd, self.claude);
                         self.is_shown = true;
                         order_button(self.claude);
@@ -681,7 +745,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 }
 
 /// Le bouton : crée la fenêtre et tourne jusqu'à la fermeture de Claude.
-pub fn run_button(offset: (i32, i32)) {
+pub fn run_button(offset: Option<(i32, i32)>, legacy: Option<(i32, i32)>) {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let instance = GetModuleHandleW(std::ptr::null());
@@ -732,7 +796,7 @@ pub fn run_button(offset: (i32, i32)) {
                 drag_moved: false,
                 accent: claudeext::theme::current().accent,
                 is_moving: false,
-                offset,
+                offset: offset.unwrap_or(DEFAULT_OFFSET),
                 scale: 1.0,
                 is_hover: false,
                 is_pressed: false,
@@ -742,9 +806,13 @@ pub fn run_button(offset: (i32, i32)) {
                 started: Instant::now(),
                 last_seen: None,
                 last_search: Instant::now() - Duration::from_secs(60),
+                anchor: claude_band::composer::track(hwnd as isize, WM_ANCHOR),
+                pane_dx: None,
+                legacy: if offset.is_none() { legacy } else { None },
+                settle_until: None,
             })
         });
-        SetTimer(hwnd, 1, 100, None);
+        SetTimer(hwnd, TIMER_TICK, 100, None);
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
