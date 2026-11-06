@@ -509,6 +509,7 @@ impl Overlay {
             }
             return;
         }
+        self.on_anchor();
         self.place();
         if !self.is_shown && !self.is_moving && self.can_show() {
             crate::debug("bouton : affiché");
@@ -546,18 +547,24 @@ impl Overlay {
     fn attach(&mut self, claude: HWND) {
         crate::debug(format!("bouton : accroché à {:?}", claude));
         self.is_moving = false;
+        // Nouvelle fenêtre (Claude relancé) : sa mise en page est à mesurer à nouveau.
+        self.pane_dx = None;
+        self.settle_until = None;
+        self.started = Instant::now();
         self.claude = claude;
         self.watch.attach(claude, self.hwnd);
     }
 
     /// Pas pendant que la liste des discussions s'ouvre ou se ferme, ni avant de savoir où
-    /// est la discussion (2 s au plus).
+    /// est la discussion (5 s au plus : Claude peut tarder à afficher la discussion).
     fn can_show(&self) -> bool {
         let settling = self.settle_until.is_some_and(|t| Instant::now() < t);
-        !settling && (self.pane_dx.is_some() || self.started.elapsed() > Duration::from_secs(2))
+        !settling && (self.pane_dx.is_some() || self.started.elapsed() > Duration::from_secs(5))
     }
 
-    /// Nouvelle mesure de claude-band : le bord gauche de la discussion a-t-il bougé ?
+    /// Dernière mesure de claude-band : le bord gauche de la discussion a-t-il bougé ?
+    /// Relue à chaque tick : la mesure peut arriver avant qu'on ait trouvé Claude (au
+    /// démarrage), et claude-band ne la renvoie que si elle change.
     fn on_anchor(&mut self) {
         let a = *self.anchor.lock().unwrap();
         if self.claude.is_null() || a.claude != self.claude as isize {
@@ -578,11 +585,7 @@ impl Overlay {
                 self.is_shown = false;
             }
         }
-        let first = self.pane_dx.is_none();
         self.pane_dx = Some(dx);
-        if first {
-            self.tick();
-        }
     }
 
     fn place(&mut self) {
@@ -635,7 +638,7 @@ impl Overlay {
                 }
             }
             WM_TIMER => self.tick(),
-            WM_ANCHOR => self.on_anchor(),
+            WM_ANCHOR => self.tick(),
             // Claude bouge (0), est saisi à la souris (1), lâché (2), ou passe devant (3).
             band::WM_CLAUDE_MOVED => match wparam {
                 1 => {
